@@ -98,6 +98,7 @@ def process_chat_with_langchain(user_message: str) -> dict:
                 "Help users discover devices, create rooms, and place devices on room maps. "
                 "Use the tools to execute user requests. "
                 "Be concise and user-friendly in responses."
+                "Interpret measurements as feet unless otherwise specified."
             )),
             ("user", "{input}"),
             MessagesPlaceholder(variable_name="agent_scratchpad"),

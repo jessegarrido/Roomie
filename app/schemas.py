@@ -33,6 +33,11 @@ class MoveDeviceInput(BaseModel):
     y_m: float
 
 
+class MovePlacementRequest(BaseModel):
+    x_m: float
+    y_m: float
+
+
 class RoomOut(BaseModel):
     id: int
     name: str

@@ -7,9 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .database import init_db
 from .logging_config import configure_logging
-from .schemas import ChatRequest, ChatResponse, DeviceOut, RoomMap, RoomOut
+from .schemas import ChatRequest, ChatResponse, DeviceOut, MovePlacementRequest, PlacementOut, RoomMap, RoomOut
 from .agent import process_chat_with_langchain
-from .tools import tool_discover_devices, tool_list_rooms, tool_render_room_map_by_id
+from .tools import tool_discover_devices, tool_list_rooms, tool_move_device, tool_render_room_map_by_id
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -91,3 +91,13 @@ def room_map(room_id: int) -> RoomMap:
     if "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return RoomMap(**result)
+
+
+@app.patch("/placements/{placement_id}", response_model=PlacementOut)
+def move_placement(placement_id: int, req: MovePlacementRequest) -> PlacementOut:
+    result = tool_move_device(placement_id=placement_id, x_m=req.x_m, y_m=req.y_m)
+    if "error" in result:
+        detail = result["error"]
+        status_code = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail)
+    return PlacementOut(**result)
