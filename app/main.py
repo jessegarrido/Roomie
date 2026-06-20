@@ -7,9 +7,31 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .database import init_db
 from .logging_config import configure_logging
-from .schemas import ChatRequest, ChatResponse, DeviceOut, MovePlacementRequest, PlacementOut, RoomMap, RoomOut
+from .schemas import (
+    ArchitecturalElementOut,
+    ChatRequest,
+    ChatResponse,
+    CreateArchitecturalElementRequest,
+    CreatePlacementRequest,
+    DeviceOut,
+    MovePlacementRequest,
+    PlacementOut,
+    RoomMap,
+    RoomOut,
+    UpdateArchitecturalElementRequest,
+)
 from .agent import process_chat_with_langchain
-from .tools import tool_discover_devices, tool_list_rooms, tool_move_device, tool_render_room_map_by_id
+from .tools import (
+    tool_delete_architectural_element,
+    tool_delete_device,
+    tool_discover_devices,
+    tool_insert_architectural_element_by_room_id,
+    tool_list_rooms,
+    tool_move_device,
+    tool_place_device_by_room_id,
+    tool_render_room_map_by_id,
+    tool_update_architectural_element,
+)
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -60,6 +82,7 @@ def list_tools() -> dict:
             "list_rooms",
             "place_device",
             "move_device",
+            "insert_architectural_element",
             "render_room_map",
         ]
     }
@@ -93,6 +116,41 @@ def room_map(room_id: int) -> RoomMap:
     return RoomMap(**result)
 
 
+@app.post("/rooms/{room_id}/placements", response_model=PlacementOut)
+def create_placement(room_id: int, req: CreatePlacementRequest) -> PlacementOut:
+    label = req.label or req.entity_id
+    result = tool_place_device_by_room_id(
+        room_id=room_id,
+        entity_id=req.entity_id,
+        label=label,
+        x_m=req.x_m,
+        y_m=req.y_m,
+    )
+    if "error" in result:
+        detail = result["error"]
+        status_code = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail)
+    return PlacementOut(**result)
+
+
+@app.post("/rooms/{room_id}/architectural-elements", response_model=ArchitecturalElementOut)
+def create_architectural_element(room_id: int, req: CreateArchitecturalElementRequest) -> ArchitecturalElementOut:
+    result = tool_insert_architectural_element_by_room_id(
+        room_id=room_id,
+        kind=req.kind,
+        x_m=req.x_m,
+        y_m=req.y_m,
+        length_m=req.length_m,
+        thickness_m=req.thickness_m,
+        orientation=req.orientation,
+    )
+    if "error" in result:
+        detail = result["error"]
+        status_code = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail)
+    return ArchitecturalElementOut(**result)
+
+
 @app.patch("/placements/{placement_id}", response_model=PlacementOut)
 def move_placement(placement_id: int, req: MovePlacementRequest) -> PlacementOut:
     result = tool_move_device(placement_id=placement_id, x_m=req.x_m, y_m=req.y_m)
@@ -101,3 +159,37 @@ def move_placement(placement_id: int, req: MovePlacementRequest) -> PlacementOut
         status_code = 404 if "not found" in detail.lower() else 400
         raise HTTPException(status_code=status_code, detail=detail)
     return PlacementOut(**result)
+
+
+@app.patch("/architectural-elements/{element_id}", response_model=ArchitecturalElementOut)
+def update_architectural_element(element_id: int, req: UpdateArchitecturalElementRequest) -> ArchitecturalElementOut:
+    result = tool_update_architectural_element(
+        element_id=element_id,
+        kind=req.kind,
+        orientation=req.orientation,
+        x_m=req.x_m,
+        y_m=req.y_m,
+        length_m=req.length_m,
+        thickness_m=req.thickness_m,
+    )
+    if "error" in result:
+        detail = result["error"]
+        status_code = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail)
+    return ArchitecturalElementOut(**result)
+
+
+@app.delete("/architectural-elements/{element_id}")
+def delete_architectural_element(element_id: int) -> dict:
+    result = tool_delete_architectural_element(element_id=element_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@app.delete("/placements/{placement_id}")
+def delete_placement(placement_id: int) -> dict:
+    result = tool_delete_device(placement_id=placement_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result

@@ -38,6 +38,31 @@ class MovePlacementRequest(BaseModel):
     y_m: float
 
 
+class CreatePlacementRequest(BaseModel):
+    entity_id: str
+    label: Optional[str] = None
+    x_m: float
+    y_m: float
+
+
+class CreateArchitecturalElementRequest(BaseModel):
+    kind: str = "wall"
+    x_m: float
+    y_m: float
+    length_m: Optional[float] = None
+    thickness_m: Optional[float] = None
+    orientation: str = "vertical"
+
+
+class UpdateArchitecturalElementRequest(BaseModel):
+    kind: Optional[str] = None
+    orientation: Optional[str] = None
+    x_m: Optional[float] = None
+    y_m: Optional[float] = None
+    length_m: Optional[float] = None
+    thickness_m: Optional[float] = None
+
+
 class RoomOut(BaseModel):
     id: int
     name: str
@@ -53,9 +78,20 @@ class PlacementOut(BaseModel):
     y_m: float
 
 
+class ArchitecturalElementOut(BaseModel):
+    id: int
+    kind: str
+    orientation: str
+    length_m: float
+    thickness_m: float
+    x_m: float
+    y_m: float
+
+
 class RoomMap(BaseModel):
     room: RoomOut
     placements: List[PlacementOut]
+    architectural_elements: List[ArchitecturalElementOut] = []
 
 
 class ChatResponse(BaseModel):

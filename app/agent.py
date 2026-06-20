@@ -11,6 +11,7 @@ from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from .tools import (
     tool_create_room,
     tool_discover_devices,
+    tool_insert_architectural_element,
     tool_list_rooms,
     tool_move_device,
     tool_place_device,
@@ -69,7 +70,40 @@ def render_room_map(room_name: str) -> dict:
     return tool_render_room_map(room_name)
 
 
-TOOLS = [discover_devices, create_room, list_rooms, place_device, move_device, render_room_map]
+@tool
+def insert_architectural_element(
+    room_name: str,
+    kind: str,
+    x_m: float,
+    y_m: float,
+    length_m: float | None = None,
+    orientation: str = "vertical",
+) -> dict:
+    """
+    Insert an architectural element into a room.
+    kind must be one of: wall, door, window, stairs.
+    length_m defaults to 3 feet (0.9144m) when omitted.
+    orientation must be horizontal or vertical.
+    """
+    return tool_insert_architectural_element(
+        room_name=room_name,
+        kind=kind,
+        x_m=x_m,
+        y_m=y_m,
+        length_m=length_m,
+        orientation=orientation,
+    )
+
+
+TOOLS = [
+    discover_devices,
+    create_room,
+    list_rooms,
+    place_device,
+    move_device,
+    insert_architectural_element,
+    render_room_map,
+]
 
 
 def process_chat_with_langchain(user_message: str) -> dict:
