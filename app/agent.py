@@ -15,6 +15,7 @@ from .tools import (
     tool_list_rooms,
     tool_move_device,
     tool_place_device,
+    tool_resize_room,
     tool_render_room_map,
 )
 
@@ -71,19 +72,28 @@ def render_room_map(room_name: str) -> dict:
 
 
 @tool
+def resize_room(room_name: str, width_m: float, height_m: float) -> dict:
+    """
+    Resize an existing room.
+    Existing items keep absolute coordinates; any that fall out of bounds are moved to the room center.
+    """
+    return tool_resize_room(room_name, width_m, height_m)
+
+
+@tool
 def insert_architectural_element(
     room_name: str,
     kind: str,
     x_m: float,
     y_m: float,
     length_m: float | None = None,
-    orientation: str = "vertical",
+    rotation_degrees: float = 0.0,
 ) -> dict:
     """
     Insert an architectural element into a room.
-    kind must be one of: wall, door, window, stairs.
+    kind must be one of: wall, door, window, stairs, void, desk, sofa.
     length_m defaults to 3 feet (0.9144m) when omitted.
-    orientation must be horizontal or vertical.
+    rotation_degrees is the rotation angle in degrees (0-360).
     """
     return tool_insert_architectural_element(
         room_name=room_name,
@@ -91,7 +101,7 @@ def insert_architectural_element(
         x_m=x_m,
         y_m=y_m,
         length_m=length_m,
-        orientation=orientation,
+        rotation_degrees=rotation_degrees,
     )
 
 
@@ -102,6 +112,7 @@ TOOLS = [
     place_device,
     move_device,
     insert_architectural_element,
+    resize_room,
     render_room_map,
 ]
 

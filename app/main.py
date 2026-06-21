@@ -14,22 +14,31 @@ from .schemas import (
     CreateArchitecturalElementRequest,
     CreatePlacementRequest,
     DeviceOut,
+    FloorCreate,
+    FloorOut,
     MovePlacementRequest,
     PlacementOut,
+    ResizeRoomRequest,
     RoomMap,
     RoomOut,
     UpdateArchitecturalElementRequest,
 )
 from .agent import process_chat_with_langchain
 from .tools import (
+    tool_assign_room_to_floor,
+    tool_create_floor,
     tool_delete_architectural_element,
     tool_delete_device,
+    tool_delete_floor,
+    tool_delete_room,
     tool_discover_devices,
     tool_insert_architectural_element_by_room_id,
+    tool_list_floors,
     tool_list_rooms,
     tool_move_device,
     tool_place_device_by_room_id,
     tool_render_room_map_by_id,
+    tool_resize_room_by_id,
     tool_update_architectural_element,
 )
 
@@ -83,7 +92,12 @@ def list_tools() -> dict:
             "place_device",
             "move_device",
             "insert_architectural_element",
+            "resize_room",
             "render_room_map",
+            "create_floor",
+            "list_floors",
+            "delete_floor",
+            "assign_room_to_floor",
         ]
     }
 
@@ -102,6 +116,38 @@ def chat(req: ChatRequest) -> ChatResponse:
     return ChatResponse(**result)
 
 
+@app.get("/floors", response_model=list[FloorOut])
+def floors() -> list[FloorOut]:
+    floors_data = tool_list_floors()
+    return [FloorOut(**floor) for floor in floors_data]
+
+
+@app.post("/floors", response_model=FloorOut, status_code=201)
+def create_floor(req: FloorCreate) -> FloorOut:
+    result = tool_create_floor(name=req.name, level=req.level)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return FloorOut(**result)
+
+
+@app.delete("/floors/{floor_id}")
+def delete_floor(floor_id: int) -> dict:
+    result = tool_delete_floor(floor_id=floor_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@app.patch("/rooms/{room_id}/assign-floor", response_model=RoomOut)
+def assign_room_to_floor(room_id: int, floor_id: int | None = None) -> RoomOut:
+    result = tool_assign_room_to_floor(room_id=room_id, floor_id=floor_id)
+    if "error" in result:
+        detail = result["error"]
+        status_code = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail)
+    return RoomOut(**result)
+
+
 @app.get("/rooms", response_model=list[RoomOut])
 def rooms() -> list[RoomOut]:
     rooms_data = tool_list_rooms()
@@ -114,6 +160,28 @@ def room_map(room_id: int) -> RoomMap:
     if "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return RoomMap(**result)
+
+
+@app.patch("/rooms/{room_id}", response_model=RoomMap)
+def resize_room(room_id: int, req: ResizeRoomRequest) -> RoomMap:
+    result = tool_resize_room_by_id(room_id=room_id, width_m=req.width_m, height_m=req.height_m)
+    if "error" in result:
+        detail = result["error"]
+        status_code = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail)
+
+    room_map_data = tool_render_room_map_by_id(room_id)
+    if "error" in room_map_data:
+        raise HTTPException(status_code=404, detail=room_map_data["error"])
+    return RoomMap(**room_map_data)
+
+
+@app.delete("/rooms/{room_id}")
+def delete_room(room_id: int) -> dict:
+    result = tool_delete_room(room_id=room_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
 
 
 @app.post("/rooms/{room_id}/placements", response_model=PlacementOut)
@@ -142,7 +210,7 @@ def create_architectural_element(room_id: int, req: CreateArchitecturalElementRe
         y_m=req.y_m,
         length_m=req.length_m,
         thickness_m=req.thickness_m,
-        orientation=req.orientation,
+        rotation_degrees=req.rotation_degrees,
     )
     if "error" in result:
         detail = result["error"]
@@ -166,7 +234,7 @@ def update_architectural_element(element_id: int, req: UpdateArchitecturalElemen
     result = tool_update_architectural_element(
         element_id=element_id,
         kind=req.kind,
-        orientation=req.orientation,
+        rotation_degrees=req.rotation_degrees,
         x_m=req.x_m,
         y_m=req.y_m,
         length_m=req.length_m,

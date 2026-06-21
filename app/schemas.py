@@ -11,6 +11,18 @@ class DeviceOut(BaseModel):
     name: str
     domain: str
     area: Optional[str] = None
+    state: Optional[str] = None
+
+
+class FloorCreate(BaseModel):
+    name: str
+    level: int = 1
+
+
+class FloorOut(BaseModel):
+    id: int
+    name: str
+    level: int
 
 
 class RoomCreate(BaseModel):
@@ -38,6 +50,11 @@ class MovePlacementRequest(BaseModel):
     y_m: float
 
 
+class ResizeRoomRequest(BaseModel):
+    width_m: float
+    height_m: float
+
+
 class CreatePlacementRequest(BaseModel):
     entity_id: str
     label: Optional[str] = None
@@ -51,12 +68,12 @@ class CreateArchitecturalElementRequest(BaseModel):
     y_m: float
     length_m: Optional[float] = None
     thickness_m: Optional[float] = None
-    orientation: str = "vertical"
+    rotation_degrees: float = 0.0
 
 
 class UpdateArchitecturalElementRequest(BaseModel):
     kind: Optional[str] = None
-    orientation: Optional[str] = None
+    rotation_degrees: Optional[float] = None
     x_m: Optional[float] = None
     y_m: Optional[float] = None
     length_m: Optional[float] = None
@@ -68,6 +85,7 @@ class RoomOut(BaseModel):
     name: str
     width_m: float
     height_m: float
+    floor_id: Optional[int] = None
 
 
 class PlacementOut(BaseModel):
@@ -76,12 +94,13 @@ class PlacementOut(BaseModel):
     label: str
     x_m: float
     y_m: float
+    state: Optional[str] = None
 
 
 class ArchitecturalElementOut(BaseModel):
     id: int
     kind: str
-    orientation: str
+    rotation_degrees: float
     length_m: float
     thickness_m: float
     x_m: float

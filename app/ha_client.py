@@ -6,10 +6,20 @@ import httpx
 
 
 MOCK_DEVICES = [
-    {"entity_id": "light.living_room_lamp", "name": "Living Room Lamp", "domain": "light", "area": "Living Room"},
-    {"entity_id": "sensor.kitchen_temp", "name": "Kitchen Temp", "domain": "sensor", "area": "Kitchen"},
-    {"entity_id": "switch.office_fan", "name": "Office Fan", "domain": "switch", "area": "Office"},
+    {"entity_id": "light.living_room_lamp", "name": "Living Room Lamp", "domain": "light", "area": "Living Room", "state": "on"},
+    {"entity_id": "sensor.kitchen_temp", "name": "Kitchen Temp", "domain": "sensor", "area": "Kitchen", "state": "22.5"},
+    {"entity_id": "fan.office_fan", "name": "Office Fan", "domain": "fan", "area": "Office", "state": "on"},
+    {"entity_id": "light.bedroom_light", "name": "Bedroom Light", "domain": "light", "area": "Bedroom", "state": "off"},
+    {"entity_id": "fan.bedroom_fan", "name": "Bedroom Fan", "domain": "fan", "area": "Bedroom", "state": "off"},
 ]
+
+MOCK_STATES = {
+    "light.living_room_lamp": "on",
+    "sensor.kitchen_temp": "22.5",
+    "fan.office_fan": "on",
+    "light.bedroom_light": "off",
+    "fan.bedroom_fan": "off",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -92,3 +102,45 @@ def discover_devices() -> List[Dict[str, Any]]:
             logger.warning("Home Assistant discovery failed (%s); falling back to mock devices.", exc)
             return MOCK_DEVICES
         return []
+
+
+def get_device_states() -> Dict[str, str]:
+    """Return a mapping of entity_id -> state string for all known devices.
+
+    When connected to Home Assistant, fetches live states from /api/states.
+    When using mock devices, returns the hardcoded MOCK_STATES dict.
+    """
+    use_mock = _env_bool("HA_USE_MOCK", True)
+    fallback_to_mock = _env_bool("HA_FALLBACK_TO_MOCK", True)
+    timeout_s = float(os.getenv("HA_TIMEOUT_SECONDS", "8"))
+
+    if use_mock:
+        return dict(MOCK_STATES)
+
+    base_url = os.getenv("HA_BASE_URL")
+    token = os.getenv("HA_TOKEN")
+    if not base_url or not token:
+        if fallback_to_mock:
+            logger.warning("HA_BASE_URL or HA_TOKEN missing; falling back to mock states.")
+            return dict(MOCK_STATES)
+        return {}
+
+    try:
+        url = f"{base_url.rstrip('/')}/api/states"
+        headers = {"Authorization": f"Bearer {token}"}
+        with httpx.Client(timeout=timeout_s, headers=headers) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            states = response.json()
+
+        result: Dict[str, str] = {}
+        for row in states:
+            entity_id = row.get("entity_id")
+            if entity_id and "." in entity_id:
+                result[entity_id] = row.get("state", "")
+        return result
+    except (httpx.HTTPError, ValueError) as exc:
+        if fallback_to_mock:
+            logger.warning("Home Assistant state fetch failed (%s); falling back to mock states.", exc)
+            return dict(MOCK_STATES)
+        return {}
