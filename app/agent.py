@@ -1,7 +1,7 @@
 import logging
 import os
 import json
-from typing import Any
+from typing import Any, List
 
 from langchain.tools import tool
 from langchain_openai import ChatOpenAI
@@ -9,12 +9,15 @@ from langchain.agents import create_openai_functions_agent, AgentExecutor
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from .tools import (
+    tool_add_devices_to_room,
     tool_create_room,
     tool_discover_devices,
+    tool_generate_embeddings,
     tool_insert_architectural_element,
     tool_list_rooms,
     tool_move_device,
     tool_place_device,
+    tool_rename_room_by_name,
     tool_resize_room,
     tool_render_room_map,
 )
@@ -105,6 +108,34 @@ def insert_architectural_element(
     )
 
 
+@tool
+def generate_embeddings(texts: List[str]) -> dict:
+    """
+    Generate vector embeddings for a list of text strings using a free Hugging Face model (all-MiniLM-L6-v2).
+    Returns embedding vectors suitable for semantic search or similarity calculations.
+    """
+    return tool_generate_embeddings(texts)
+
+
+@tool
+def rename_room(room_name: str, new_name: str) -> dict:
+    """
+    Rename an existing room to a new name.
+    """
+    return tool_rename_room_by_name(room_name, new_name)
+
+
+@tool
+def add_devices_to_room(room_name: str, description: str, max_devices: int = 10) -> dict:
+    """
+    Search for devices matching a semantic description and place them all in a room at once.
+    Evaluates Home Assistant device attributes (name, domain, area) and uses embeddings for
+    relevance ranking. Devices are automatically arranged along the room perimeter.
+    Returns which devices were placed and their positions.
+    """
+    return tool_add_devices_to_room(room_name, description, max_devices)
+
+
 TOOLS = [
     discover_devices,
     create_room,
@@ -112,8 +143,11 @@ TOOLS = [
     place_device,
     move_device,
     insert_architectural_element,
+    generate_embeddings,
+    rename_room,
     resize_room,
     render_room_map,
+    add_devices_to_room,
 ]
 
 

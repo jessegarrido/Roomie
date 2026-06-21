@@ -14,11 +14,15 @@ from .schemas import (
     CreateArchitecturalElementRequest,
     CreatePlacementRequest,
     DeviceOut,
+    DeviceSearchRequest,
     FloorCreate,
     FloorOut,
     MovePlacementRequest,
     PlacementOut,
+    RenameFloorRequest,
+    RenameRoomRequest,
     ResizeRoomRequest,
+    RoomCreate,
     RoomMap,
     RoomOut,
     UpdateArchitecturalElementRequest,
@@ -37,8 +41,11 @@ from .tools import (
     tool_list_rooms,
     tool_move_device,
     tool_place_device_by_room_id,
+    tool_rename_floor,
+    tool_rename_room,
     tool_render_room_map_by_id,
     tool_resize_room_by_id,
+    tool_search_devices,
     tool_update_architectural_element,
 )
 
@@ -108,6 +115,11 @@ def devices() -> list[DeviceOut]:
     return [DeviceOut(**device) for device in discovered]
 
 
+@app.post("/devices/search")
+def search_devices(req: DeviceSearchRequest) -> dict:
+    return tool_search_devices(query=req.query, top_k=req.top_k)
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
     logger.info("Chat request received: %s", req.message)
@@ -138,6 +150,16 @@ def delete_floor(floor_id: int) -> dict:
     return result
 
 
+@app.patch("/floors/{floor_id}/rename", response_model=FloorOut)
+def rename_floor(floor_id: int, req: RenameFloorRequest) -> FloorOut:
+    result = tool_rename_floor(floor_id=floor_id, name=req.name)
+    if "error" in result:
+        detail = result["error"]
+        status_code = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail)
+    return FloorOut(**result)
+
+
 @app.patch("/rooms/{room_id}/assign-floor", response_model=RoomOut)
 def assign_room_to_floor(room_id: int, floor_id: int | None = None) -> RoomOut:
     result = tool_assign_room_to_floor(room_id=room_id, floor_id=floor_id)
@@ -152,6 +174,16 @@ def assign_room_to_floor(room_id: int, floor_id: int | None = None) -> RoomOut:
 def rooms() -> list[RoomOut]:
     rooms_data = tool_list_rooms()
     return [RoomOut(**room) for room in rooms_data]
+
+
+@app.post("/rooms", response_model=RoomOut)
+def create_room(req: RoomCreate) -> RoomOut:
+    result = tool_create_room(name=req.name, width_m=req.width_m, height_m=req.height_m, floor_id=req.floor_id)
+    if "error" in result:
+        detail = result["error"]
+        status_code = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail)
+    return RoomOut(**result)
 
 
 @app.get("/rooms/{room_id}/map", response_model=RoomMap)
@@ -182,6 +214,16 @@ def delete_room(room_id: int) -> dict:
     if "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result
+
+
+@app.patch("/rooms/{room_id}/rename", response_model=RoomOut)
+def rename_room(room_id: int, req: RenameRoomRequest) -> RoomOut:
+    result = tool_rename_room(room_id=room_id, name=req.name)
+    if "error" in result:
+        detail = result["error"]
+        status_code = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail)
+    return RoomOut(**result)
 
 
 @app.post("/rooms/{room_id}/placements", response_model=PlacementOut)

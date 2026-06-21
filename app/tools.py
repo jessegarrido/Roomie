@@ -8,6 +8,21 @@ from .ha_client import discover_devices, get_device_states
 
 logger = logging.getLogger(__name__)
 
+# Lazy-loaded sentence-transformers model for embedding generation
+_embedding_model = None
+
+# In-memory cache for discovered devices and their embeddings (refreshed on demand)
+_device_cache: Optional[Dict[str, Any]] = None
+
+
+def _get_embedding_model():
+    global _embedding_model
+    if _embedding_model is None:
+        from sentence_transformers import SentenceTransformer
+        # "all-MiniLM-L6-v2" is a free, fast, and good-quality model from Hugging Face
+        _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _embedding_model
+
 VALID_ARCHITECTURAL_KINDS = {"wall", "door", "window", "stairs", "void", "desk", "sofa", "box"}
 DEFAULT_ELEMENT_LENGTH_M = 3 * 0.3048
 DEFAULT_ELEMENT_THICKNESS_M = 1 * 0.3048
@@ -60,6 +75,25 @@ def tool_delete_floor(floor_id: int) -> Dict[str, Any]:
         session.commit()
         logger.info("delete_floor removed floor id=%s and unassigned %d rooms", floor_id, len(rooms_on_floor))
         return {"ok": True, "id": floor_id}
+
+
+def tool_rename_floor(floor_id: int, name: str) -> Dict[str, Any]:
+    logger.info("rename_floor requested: floor_id=%s name=%s", floor_id, name)
+    with get_session() as session:
+        floor = session.get(Floor, floor_id)
+        if not floor:
+            logger.warning("rename_floor failed; floor not found: %s", floor_id)
+            return {"error": f"Floor id {floor_id} not found."}
+        existing = session.exec(select(Floor).where(Floor.name == name, Floor.id != floor_id)).first()
+        if existing:
+            logger.warning("rename_floor rejected duplicate name: %s", name)
+            return {"error": f"Floor '{name}' already exists."}
+        floor.name = name
+        session.add(floor)
+        session.commit()
+        session.refresh(floor)
+        logger.info("rename_floor updated: id=%s name=%s", floor.id, floor.name)
+        return {"id": floor.id, "name": floor.name, "level": floor.level}
 
 
 def tool_assign_room_to_floor(room_id: int, floor_id: Optional[int] = None) -> Dict[str, Any]:
@@ -475,6 +509,45 @@ def tool_delete_room(room_id: int) -> Dict[str, Any]:
         return {"ok": True, "id": room_id}
 
 
+def tool_rename_room(room_id: int, name: str) -> Dict[str, Any]:
+    logger.info("rename_room requested: room_id=%s name=%s", room_id, name)
+    with get_session() as session:
+        room = session.get(Room, room_id)
+        if not room:
+            logger.warning("rename_room failed; room not found: %s", room_id)
+            return {"error": f"Room id {room_id} not found."}
+        existing = session.exec(select(Room).where(Room.name == name, Room.id != room_id)).first()
+        if existing:
+            logger.warning("rename_room rejected duplicate name: %s", name)
+            return {"error": f"Room '{name}' already exists."}
+        room.name = name
+        session.add(room)
+        session.commit()
+        session.refresh(room)
+        logger.info("rename_room updated: id=%s name=%s", room.id, room.name)
+        return {"id": room.id, "name": room.name, "width_m": room.width_m, "height_m": room.height_m, "floor_id": room.floor_id}
+
+
+def tool_rename_room_by_name(room_name: str, new_name: str) -> Dict[str, Any]:
+    logger.info("rename_room_by_name requested: room_name=%s new_name=%s", room_name, new_name)
+    room = _get_room_by_name(room_name)
+    if not room:
+        logger.warning("rename_room_by_name failed; room not found: %s", room_name)
+        return {"error": f"Room '{room_name}' not found."}
+    with get_session() as session:
+        existing = session.exec(select(Room).where(Room.name == new_name, Room.id != room.id)).first()
+        if existing:
+            logger.warning("rename_room_by_name rejected duplicate name: %s", new_name)
+            return {"error": f"Room '{new_name}' already exists."}
+        room = session.get(Room, room.id)
+        room.name = new_name
+        session.add(room)
+        session.commit()
+        session.refresh(room)
+        logger.info("rename_room_by_name updated: id=%s name=%s", room.id, room.name)
+        return {"id": room.id, "name": room.name, "width_m": room.width_m, "height_m": room.height_m, "floor_id": room.floor_id}
+
+
 def tool_render_room_map(room_name: str) -> Dict[str, Any]:
     logger.info("render_room_map requested: room=%s", room_name)
     room = _get_room_by_name(room_name)
@@ -497,3 +570,134 @@ def tool_render_room_map_by_id(room_id: int) -> Dict[str, Any]:
     room_map = _build_room_map(room)
     logger.info("render_room_map_by_id returned %d placements for room_id=%s", len(room_map["placements"]), room.id)
     return room_map
+
+
+def tool_generate_embeddings(texts: List[str]) -> Dict[str, Any]:
+    """
+    Generate vector embeddings for a list of text strings using a free Hugging Face model.
+    Returns a list of embedding vectors (384-dimensional for all-MiniLM-L6-v2).
+    """
+    logger.info("generate_embeddings requested for %d texts", len(texts))
+    if not texts:
+        return {"error": "No texts provided."}
+    try:
+        model = _get_embedding_model()
+        embeddings = model.encode(texts, normalize_embeddings=True)
+        # Convert numpy array to list of lists for JSON serialization
+        embedding_lists = embeddings.tolist()
+        return {
+            "count": len(texts),
+            "dimension": len(embedding_lists[0]) if embedding_lists else 0,
+            "embeddings": embedding_lists,
+        }
+    except Exception as e:
+        logger.error("generate_embeddings failed: %s", e)
+        return {"error": str(e)}
+
+
+def _get_device_cache() -> Dict[str, Any]:
+    """Return cached device list with pre-computed embeddings, rebuilding if needed."""
+    global _device_cache
+    if _device_cache is None or _device_cache.get("needs_refresh", False):
+        devices = discover_devices()
+        texts = [f"{d['name']} {d['entity_id']} {d['domain']} {d.get('area', '') or ''}" for d in devices]
+        model = _get_embedding_model()
+        embeddings = model.encode(texts, normalize_embeddings=True)
+        _device_cache = {
+            "devices": devices,
+            "embeddings": embeddings.tolist(),
+            "texts": texts,
+            "needs_refresh": False,
+        }
+        logger.info("Device cache rebuilt: %d devices", len(devices))
+    return _device_cache
+
+
+def tool_search_devices(query: str, top_k: int = 20) -> Dict[str, Any]:
+    """
+    Search discovered devices by semantic similarity using embeddings.
+    Returns the top_k most relevant matches for the query.
+    """
+    logger.info("search_devices requested: query=%s top_k=%d", query, top_k)
+    if not query.strip():
+        return {"error": "Query cannot be empty."}
+    try:
+        cache = _get_device_cache()
+        model = _get_embedding_model()
+        query_embedding = model.encode([query], normalize_embeddings=True)[0].tolist()
+        # Cosine similarity = dot product since embeddings are normalized
+        similarities = [
+            sum(q * e for q, e in zip(query_embedding, emb))
+            for emb in cache["embeddings"]
+        ]
+        # Sort by similarity descending
+        ranked = sorted(zip(similarities, cache["devices"]), key=lambda x: x[0], reverse=True)
+        results = [
+            {**device, "relevance_score": round(score, 4)}
+            for score, device in ranked[:top_k]
+        ]
+        return {"query": query, "count": len(results), "results": results}
+    except Exception as e:
+        logger.error("search_devices failed: %s", e)
+        return {"error": str(e)}
+
+
+def tool_add_devices_to_room(room_name: str, description: str, max_devices: int = 10) -> Dict[str, Any]:
+    """
+    Search for devices matching a semantic description and place them all in a room.
+    Uses both Home Assistant device attributes (name, domain, area) and pre-computed
+    embeddings for relevance ranking. Devices are placed along the perimeter of the room.
+    Returns a summary of which devices were placed.
+    """
+    logger.info("add_devices_to_room requested: room=%s description=%s max=%d", room_name, description, max_devices)
+
+    room = _get_room_by_name(room_name)
+    if not room:
+        return {"error": f"Room '{room_name}' not found."}
+
+    search_results = tool_search_devices(description, top_k=max_devices)
+    if "error" in search_results:
+        return search_results
+
+    placed = []
+    errors = []
+    # Place devices along perimeter, cycling through sides
+    sides = [
+        (0, 0, room.width_m - 0.5, 0),          # bottom wall
+        (room.width_m - 0.5, 0, room.width_m - 0.5, room.height_m - 0.5),  # right wall
+        (0, room.height_m - 0.5, room.width_m - 0.5, room.height_m - 0.5),  # top wall
+        (0, 0, 0, room.height_m - 0.5),         # left wall
+    ]
+    slot_width = 0.6  # meters between device slots
+
+    for idx, device in enumerate(search_results.get("results", [])):
+        side_idx = idx % len(sides)
+        side = sides[side_idx]
+        # Simple linear spacing along each side
+        offset = (idx // len(sides)) * slot_width
+        if side_idx == 0:      # bottom wall: left to right
+            x, y = side[0] + offset, side[1] + 0.3
+        elif side_idx == 1:    # right wall: bottom to top
+            x, y = side[0] - 0.3, side[1] + offset
+        elif side_idx == 2:    # top wall: right to left
+            x, y = side[2] - offset, side[3] - 0.3
+        else:                  # left wall: top to bottom
+            x, y = side[0] + 0.3, side[3] - offset
+
+        # Clamp to room bounds
+        x = max(0.2, min(room.width_m - 0.2, x))
+        y = max(0.2, min(room.height_m - 0.2, y))
+
+        result = tool_place_device(room_name, device["entity_id"], device["name"], x, y)
+        if "error" in result:
+            errors.append({"entity_id": device["entity_id"], "error": result["error"]})
+        else:
+            placed.append({"entity_id": device["entity_id"], "label": device["name"], "x_m": x, "y_m": y, "relevance_score": device.get("relevance_score")})
+
+    return {
+        "room": room_name,
+        "description": description,
+        "placed_count": len(placed),
+        "devices": placed,
+        "errors": errors,
+    }

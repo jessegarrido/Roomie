@@ -14,6 +14,11 @@ class DeviceOut(BaseModel):
     state: Optional[str] = None
 
 
+class DeviceSearchRequest(BaseModel):
+    query: str
+    top_k: int = 20
+
+
 class FloorCreate(BaseModel):
     name: str
     level: int = 1
@@ -29,6 +34,7 @@ class RoomCreate(BaseModel):
     name: str
     width_m: float
     height_m: float
+    floor_id: Optional[int] = None
 
 
 class PlaceDeviceInput(BaseModel):
@@ -53,6 +59,14 @@ class MovePlacementRequest(BaseModel):
 class ResizeRoomRequest(BaseModel):
     width_m: float
     height_m: float
+
+
+class RenameRoomRequest(BaseModel):
+    name: str
+
+
+class RenameFloorRequest(BaseModel):
+    name: str
 
 
 class CreatePlacementRequest(BaseModel):

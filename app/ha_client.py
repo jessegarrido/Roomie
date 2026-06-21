@@ -1,8 +1,10 @@
 import os
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import httpx
+import asyncio
+import json
 
 
 MOCK_DEVICES = [
@@ -73,6 +75,114 @@ def _discover_from_states(base_url: str, token: str, timeout_s: float) -> List[D
     return discovered
 
 
+async def _ws_client(base_url: str, token: str):
+    """Create an async websocket client for Home Assistant."""
+    import websockets
+    url = base_url.replace("https://", "wss://").rstrip("/") + "/api/websocket"
+    ws = await websockets.connect(url, extra_headers={"Authorization": f"Bearer {token}"})
+    # Receive auth_required
+    await ws.recv()
+    await ws.send(json.dumps({"type": "auth", "access_token": token}))
+    auth_result = await ws.recv()
+    auth_data = json.loads(auth_result)
+    if auth_data.get("type") != "auth_ok":
+        raise RuntimeError(f"HA WebSocket auth failed: {auth_result}")
+    return ws
+
+
+async def _discover_from_ws(base_url: str, token: str, timeout_s: float) -> List[Dict[str, Any]]:
+    """Fetch entities with area assignments via Home Assistant WebSocket API.
+    
+    The /api/states endpoint doesn't include area_id on entities.
+    Instead, we need to:
+    1. Fetch entity registry to get entity -> device_id mapping
+    2. Fetch device registry to get device_id -> area_id mapping
+    3. Fetch area registry to get area_id -> area name
+    Then cross-reference to assign areas to entities.
+    """
+    ws = await asyncio.wait_for(_ws_client(base_url, token), timeout=timeout_s)
+    
+    # Get area registry
+    await ws.send(json.dumps({"id": 1, "type": "config/area_registry/list"}))
+    areas_raw = await asyncio.wait_for(ws.recv(), timeout=timeout_s)
+    areas_data = json.loads(areas_raw).get("result", [])
+    area_id_to_name: Dict[str, str] = {a["area_id"]: a["name"] for a in areas_data}
+    
+    # Get device registry (device_id -> area_id)
+    await ws.send(json.dumps({"id": 2, "type": "config/device_registry/list"}))
+    devices_raw = await asyncio.wait_for(ws.recv(), timeout=timeout_s)
+    devices_data = json.loads(devices_raw).get("result", [])
+    device_id_to_area: Dict[str, str] = {
+        d["id"]: area_id_to_name.get(d["area_id"] or "", "")
+        for d in devices_data
+    }
+    
+    # Get entity registry (entity_id -> device_id)
+    await ws.send(json.dumps({"id": 3, "type": "config/entity_registry/list"}))
+    entities_raw = await asyncio.wait_for(ws.recv(), timeout=timeout_s)
+    entities_data = json.loads(entities_raw).get("result", [])
+    
+    await ws.close()
+    
+    # Build entity -> area mapping through device cross-reference
+    entity_to_area: Dict[str, str] = {}
+    for e in entities_data:
+        dev_id = e.get("device_id")
+        area_id = e.get("area_id")
+        entity_id = e.get("entity_id")
+        if entity_id and area_id:
+            # Entity has direct area assignment
+            entity_to_area[entity_id] = area_id_to_name.get(area_id, area_id)
+        elif entity_id and dev_id and dev_id in device_id_to_area:
+            # Entity area comes from its device
+            entity_to_area[entity_id] = device_id_to_area[dev_id]
+    
+    # Also get states to get current state and friendly_name
+    async with httpx.AsyncClient(timeout=timeout_s) as client:
+        headers = {"Authorization": f"Bearer {token}"}
+        response = await client.get(f"{base_url.rstrip('/')}/api/states", headers=headers)
+        response.raise_for_status()
+        states = response.json()
+    
+    discovered: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    
+    for row in states:
+        entity_id = row.get("entity_id")
+        if not entity_id or "." not in entity_id:
+            continue
+        domain = entity_id.split(".", 1)[0]
+        if domain in {"automation", "calendar"}:
+            continue
+        if entity_id in seen:
+            continue
+        
+        attrs = row.get("attributes") or {}
+        # Prefer direct area attr, fallback to device-derived area, then None
+        direct_area = (
+            attrs.get("area_name")
+            or attrs.get("area")
+            or attrs.get("room")
+            or attrs.get("suggested_area")
+            or attrs.get("area_id")
+        )
+        area = direct_area or entity_to_area.get(entity_id)
+        
+        discovered.append(
+            {
+                "entity_id": entity_id,
+                "name": attrs.get("friendly_name") or entity_id,
+                "domain": domain,
+                "area": area,
+                "state": row.get("state"),
+            }
+        )
+        seen.add(entity_id)
+    
+    discovered.sort(key=lambda d: d["entity_id"])
+    return discovered
+
+
 def discover_devices() -> List[Dict[str, Any]]:
     use_mock = _env_bool("HA_USE_MOCK", True)
     fallback_to_mock = _env_bool("HA_FALLBACK_TO_MOCK", True)
@@ -90,7 +200,8 @@ def discover_devices() -> List[Dict[str, Any]]:
         return []
 
     try:
-        devices = _discover_from_states(base_url=base_url, token=token, timeout_s=timeout_s)
+        # Use WebSocket API to get area assignments (REST /api/states doesn't expose areas)
+        devices = asyncio.run(_discover_from_ws(base_url=base_url, token=token, timeout_s=timeout_s))
         if devices:
             return devices
         if fallback_to_mock:
