@@ -79,7 +79,7 @@ async def _ws_client(base_url: str, token: str):
     """Create an async websocket client for Home Assistant."""
     import websockets
     url = base_url.replace("https://", "wss://").rstrip("/") + "/api/websocket"
-    ws = await websockets.connect(url, extra_headers={"Authorization": f"Bearer {token}"})
+    ws = await websockets.connect(url, additional_headers={"Authorization": f"Bearer {token}"})
     # Receive auth_required
     await ws.recv()
     await ws.send(json.dumps({"type": "auth", "access_token": token}))

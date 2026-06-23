@@ -134,14 +134,14 @@ def test_delete_placement_endpoint_returns_404_for_missing_placement() -> None:
     assert "not found" in detail.lower()
 
 
-def test_create_architectural_element_endpoint_uses_default_length() -> None:
-    room_name = f"API Arch Room {uuid4().hex[:8]}"
+def test_create_fixture_endpoint_uses_default_length() -> None:
+    room_name = f"API Fixture Room {uuid4().hex[:8]}"
     created = tool_create_room(room_name, 6.0, 4.0)
     assert "error" not in created
 
     with TestClient(app) as client:
         create_response = client.post(
-            f"/rooms/{created['id']}/architectural-elements",
+            f"/rooms/{created['id']}/fixtures",
             json={
                 "kind": "wall",
                 "x_m": 1.0,
@@ -159,17 +159,17 @@ def test_create_architectural_element_endpoint_uses_default_length() -> None:
 
     assert map_response.status_code == 200
     payload = map_response.json()
-    assert any(e["id"] == element["id"] for e in payload["architectural_elements"])
+    assert any(e["id"] == element["id"] for e in payload["fixtures"])
 
 
-def test_update_architectural_element_endpoint_cycles_kind_and_rotation() -> None:
-    room_name = f"API Arch Update Room {uuid4().hex[:8]}"
+def test_update_fixture_endpoint_cycles_kind_and_rotation() -> None:
+    room_name = f"API Fixture Update Room {uuid4().hex[:8]}"
     created = tool_create_room(room_name, 6.0, 4.0)
     assert "error" not in created
 
     with TestClient(app) as client:
         create_response = client.post(
-            f"/rooms/{created['id']}/architectural-elements",
+            f"/rooms/{created['id']}/fixtures",
             json={
                 "kind": "door",
                 "x_m": 1.5,
@@ -180,7 +180,7 @@ def test_update_architectural_element_endpoint_cycles_kind_and_rotation() -> Non
         )
         element_id = create_response.json()["id"]
         update_response = client.patch(
-            f"/architectural-elements/{element_id}",
+            f"/fixtures/{element_id}",
             json={
                 "kind": "window",
                 "rotation_degrees": 90.0,
@@ -194,14 +194,14 @@ def test_update_architectural_element_endpoint_cycles_kind_and_rotation() -> Non
     assert updated["rotation_degrees"] == 90.0
 
 
-def test_update_architectural_element_endpoint_moves_position() -> None:
-    room_name = f"API Arch Move Room {uuid4().hex[:8]}"
+def test_update_fixture_endpoint_moves_position() -> None:
+    room_name = f"API Fixture Move Room {uuid4().hex[:8]}"
     created = tool_create_room(room_name, 6.0, 4.0)
     assert "error" not in created
 
     with TestClient(app) as client:
         create_response = client.post(
-            f"/rooms/{created['id']}/architectural-elements",
+            f"/rooms/{created['id']}/fixtures",
             json={
                 "kind": "wall",
                 "x_m": 1.0,
@@ -210,7 +210,7 @@ def test_update_architectural_element_endpoint_moves_position() -> None:
         )
         element_id = create_response.json()["id"]
         update_response = client.patch(
-            f"/architectural-elements/{element_id}",
+            f"/fixtures/{element_id}",
             json={"x_m": 2.25, "y_m": 3.0},
         )
 
@@ -221,14 +221,14 @@ def test_update_architectural_element_endpoint_moves_position() -> None:
     assert updated["y_m"] == 3.0
 
 
-def test_delete_architectural_element_endpoint_removes_element() -> None:
-    room_name = f"API Arch Delete Room {uuid4().hex[:8]}"
+def test_delete_fixture_endpoint_removes_element() -> None:
+    room_name = f"API Fixture Delete Room {uuid4().hex[:8]}"
     created = tool_create_room(room_name, 6.0, 4.0)
     assert "error" not in created
 
     with TestClient(app) as client:
         create_response = client.post(
-            f"/rooms/{created['id']}/architectural-elements",
+            f"/rooms/{created['id']}/fixtures",
             json={
                 "kind": "door",
                 "x_m": 1.0,
@@ -236,7 +236,7 @@ def test_delete_architectural_element_endpoint_removes_element() -> None:
             },
         )
         element_id = create_response.json()["id"]
-        delete_response = client.delete(f"/architectural-elements/{element_id}")
+        delete_response = client.delete(f"/fixtures/{element_id}")
         map_response = client.get(f"/rooms/{created['id']}/map")
 
     assert create_response.status_code == 200
@@ -246,17 +246,17 @@ def test_delete_architectural_element_endpoint_removes_element() -> None:
     assert deleted["id"] == element_id
 
     payload = map_response.json()
-    assert not any(e["id"] == element_id for e in payload.get("architectural_elements", []))
+    assert not any(e["id"] == element_id for e in payload.get("fixtures", []))
 
 
-def test_update_architectural_element_endpoint_updates_length() -> None:
-    room_name = f"API Arch Resize Room {uuid4().hex[:8]}"
+def test_update_fixture_endpoint_updates_length() -> None:
+    room_name = f"API Fixture Resize Room {uuid4().hex[:8]}"
     created = tool_create_room(room_name, 6.0, 4.0)
     assert "error" not in created
 
     with TestClient(app) as client:
         create_response = client.post(
-            f"/rooms/{created['id']}/architectural-elements",
+            f"/rooms/{created['id']}/fixtures",
             json={
                 "kind": "wall",
                 "x_m": 1.0,
@@ -266,7 +266,7 @@ def test_update_architectural_element_endpoint_updates_length() -> None:
         )
         element_id = create_response.json()["id"]
         update_response = client.patch(
-            f"/architectural-elements/{element_id}",
+            f"/fixtures/{element_id}",
             json={"length_m": 1.8},
         )
 
@@ -276,14 +276,14 @@ def test_update_architectural_element_endpoint_updates_length() -> None:
     assert updated["length_m"] == 1.8
 
 
-def test_update_architectural_element_endpoint_updates_thickness() -> None:
-    room_name = f"API Arch Thickness Room {uuid4().hex[:8]}"
+def test_update_fixture_endpoint_updates_thickness() -> None:
+    room_name = f"API Fixture Thickness Room {uuid4().hex[:8]}"
     created = tool_create_room(room_name, 6.0, 4.0)
     assert "error" not in created
 
     with TestClient(app) as client:
         create_response = client.post(
-            f"/rooms/{created['id']}/architectural-elements",
+            f"/rooms/{created['id']}/fixtures",
             json={
                 "kind": "window",
                 "x_m": 1.0,
@@ -293,7 +293,7 @@ def test_update_architectural_element_endpoint_updates_thickness() -> None:
         )
         element_id = create_response.json()["id"]
         update_response = client.patch(
-            f"/architectural-elements/{element_id}",
+            f"/fixtures/{element_id}",
             json={"thickness_m": 0.7},
         )
 

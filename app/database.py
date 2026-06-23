@@ -6,7 +6,26 @@ engine = create_engine(DATABASE_URL, echo=False)
 
 
 def init_db() -> None:
+    # Rename old "architecturalelement" table to "fixture" BEFORE create_all,
+    # otherwise create_all will create an empty "fixture" table and the rename will fail.
+    with engine.connect() as conn:
+        old_table = conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='architecturalelement'"
+        ).first()
+        new_table = conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='fixture'"
+        ).first()
+        if old_table:
+            if new_table:
+                # Both tables exist (e.g. a previous failed migration left an empty fixture table).
+                # Drop the empty fixture table so we can rename the old one with its data.
+                conn.exec_driver_sql("DROP TABLE fixture")
+                conn.commit()
+            conn.exec_driver_sql("ALTER TABLE architecturalelement RENAME TO fixture")
+            conn.commit()
+
     SQLModel.metadata.create_all(engine)
+
     # Lightweight migration for existing SQLite DBs.
     with engine.connect() as conn:
         # Ensure floor table exists
@@ -28,32 +47,33 @@ def init_db() -> None:
             )
             conn.commit()
 
-        table_exists = conn.exec_driver_sql(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='architecturalelement'"
+        # Ensure fixture table has required columns
+        fixture_exists = conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='fixture'"
         ).first()
-        if table_exists:
-            columns = conn.exec_driver_sql("PRAGMA table_info('architecturalelement')").fetchall()
+        if fixture_exists:
+            columns = conn.exec_driver_sql("PRAGMA table_info('fixture')").fetchall()
             names = {row[1] for row in columns}
             if "thickness_m" not in names:
                 conn.exec_driver_sql(
-                    "ALTER TABLE architecturalelement ADD COLUMN thickness_m FLOAT DEFAULT 0.3048"
+                    "ALTER TABLE fixture ADD COLUMN thickness_m FLOAT DEFAULT 0.3048"
                 )
                 conn.commit()
             # Migrate orientation column to rotation_degrees
             if "orientation" in names and "rotation_degrees" not in names:
                 conn.exec_driver_sql(
-                    "ALTER TABLE architecturalelement ADD COLUMN rotation_degrees FLOAT DEFAULT 0.0"
+                    "ALTER TABLE fixture ADD COLUMN rotation_degrees FLOAT DEFAULT 0.0"
                 )
                 conn.commit()
                 # Convert orientation values to rotation_degrees
                 conn.exec_driver_sql(
-                    "UPDATE architecturalelement SET rotation_degrees = CASE WHEN orientation = 'horizontal' THEN 90.0 ELSE 0.0 END"
+                    "UPDATE fixture SET rotation_degrees = CASE WHEN orientation = 'horizontal' THEN 90.0 ELSE 0.0 END"
                 )
                 conn.commit()
                 # Note: SQLite doesn't support DROP COLUMN before 3.35.0, so we leave the old column
             elif "orientation" not in names and "rotation_degrees" not in names:
                 conn.exec_driver_sql(
-                    "ALTER TABLE architecturalelement ADD COLUMN rotation_degrees FLOAT DEFAULT 0.0"
+                    "ALTER TABLE fixture ADD COLUMN rotation_degrees FLOAT DEFAULT 0.0"
                 )
                 conn.commit()
 

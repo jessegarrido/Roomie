@@ -1,9 +1,11 @@
-from typing import Any, Dict, List, Optional
+import json
+import time
+from typing import Any, Dict, List, Optional, Set
 import logging
 from sqlmodel import select
 
 from .database import get_session
-from .models import ArchitecturalElement, Floor, Room, DevicePlacement
+from .models import Fixture, Floor, Room, DevicePlacement
 from .ha_client import discover_devices, get_device_states
 
 logger = logging.getLogger(__name__)
@@ -23,7 +25,7 @@ def _get_embedding_model():
         _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
     return _embedding_model
 
-VALID_ARCHITECTURAL_KINDS = {"wall", "door", "window", "stairs", "void", "desk", "sofa", "box"}
+VALID_FIXTURE_KINDS = {"wall", "door", "window", "stairs", "void", "desk", "sofa", "entry", "sink", "fixture"}
 DEFAULT_ELEMENT_LENGTH_M = 3 * 0.3048
 DEFAULT_ELEMENT_THICKNESS_M = 1 * 0.3048
 
@@ -151,7 +153,7 @@ def _resize_room_and_reposition(session, room: Room, width_m: float, height_m: f
     default_y_m = height_m / 2
 
     placements = session.exec(select(DevicePlacement).where(DevicePlacement.room_id == room.id)).all()
-    elements = session.exec(select(ArchitecturalElement).where(ArchitecturalElement.room_id == room.id)).all()
+    elements = session.exec(select(Fixture).where(Fixture.room_id == room.id)).all()
 
     repositioned_placements = 0
     repositioned_elements = 0
@@ -179,7 +181,7 @@ def _resize_room_and_reposition(session, room: Room, width_m: float, height_m: f
         "width_m": room.width_m,
         "height_m": room.height_m,
         "repositioned_placements": repositioned_placements,
-        "repositioned_architectural_elements": repositioned_elements,
+        "repositioned_fixtures": repositioned_elements,
     }
 
 
@@ -216,7 +218,7 @@ def _get_room_by_id(room_id: int) -> Optional[Room]:
 def _build_room_map(room: Room) -> Dict[str, Any]:
     with get_session() as session:
         placements = session.exec(select(DevicePlacement).where(DevicePlacement.room_id == room.id)).all()
-        elements = session.exec(select(ArchitecturalElement).where(ArchitecturalElement.room_id == room.id)).all()
+        elements = session.exec(select(Fixture).where(Fixture.room_id == room.id)).all()
 
         # Enrich placements with current device state from Home Assistant
         device_states = get_device_states()
@@ -234,7 +236,7 @@ def _build_room_map(room: Room) -> Dict[str, Any]:
                 }
                 for p in placements
             ],
-            "architectural_elements": [
+            "fixtures": [
                 {
                     "id": e.id,
                     "kind": e.kind,
@@ -343,7 +345,7 @@ def tool_delete_device(placement_id: int) -> Dict[str, Any]:
         return {"ok": True, "id": placement_id}
 
 
-def tool_insert_architectural_element(
+def tool_insert_fixture(
     room_name: str,
     kind: str,
     x_m: float,
@@ -353,7 +355,7 @@ def tool_insert_architectural_element(
     rotation_degrees: float = 0.0,
 ) -> Dict[str, Any]:
     logger.info(
-        "insert_architectural_element requested: room=%s kind=%s x=%.2f y=%.2f rotation=%.1f",
+        "insert_fixture requested: room=%s kind=%s x=%.2f y=%.2f rotation=%.1f",
         room_name,
         kind,
         x_m,
@@ -364,7 +366,7 @@ def tool_insert_architectural_element(
     if not room:
         return {"error": f"Room '{room_name}' not found."}
 
-    if kind not in VALID_ARCHITECTURAL_KINDS:
+    if kind not in VALID_FIXTURE_KINDS:
         return {"error": f"Unsupported element kind '{kind}'."}
 
     chosen_length_m = length_m if length_m is not None else DEFAULT_ELEMENT_LENGTH_M
@@ -375,7 +377,7 @@ def tool_insert_architectural_element(
         return {"error": "Element thickness must be positive."}
 
     with get_session() as session:
-        element = ArchitecturalElement(
+        element = Fixture(
             room_id=room.id,
             kind=kind,
             rotation_degrees=rotation_degrees,
@@ -399,7 +401,7 @@ def tool_insert_architectural_element(
         }
 
 
-def tool_insert_architectural_element_by_room_id(
+def tool_insert_fixture_by_room_id(
     room_id: int,
     kind: str,
     x_m: float,
@@ -411,7 +413,7 @@ def tool_insert_architectural_element_by_room_id(
     room = _get_room_by_id(room_id)
     if not room:
         return {"error": f"Room id {room_id} not found."}
-    return tool_insert_architectural_element(
+    return tool_insert_fixture(
         room_name=room.name,
         kind=kind,
         x_m=x_m,
@@ -422,7 +424,7 @@ def tool_insert_architectural_element_by_room_id(
     )
 
 
-def tool_update_architectural_element(
+def tool_update_fixture(
     element_id: int,
     kind: Optional[str] = None,
     rotation_degrees: Optional[float] = None,
@@ -432,16 +434,16 @@ def tool_update_architectural_element(
     thickness_m: Optional[float] = None,
 ) -> Dict[str, Any]:
     with get_session() as session:
-        element = session.get(ArchitecturalElement, element_id)
+        element = session.get(Fixture, element_id)
         if not element:
-            return {"error": f"Architectural element {element_id} not found."}
+            return {"error": f"Fixture {element_id} not found."}
 
         room = session.get(Room, element.room_id)
         if not room:
-            return {"error": "Room for architectural element not found."}
+            return {"error": "Room for fixture not found."}
 
         if kind is not None:
-            if kind not in VALID_ARCHITECTURAL_KINDS:
+            if kind not in VALID_FIXTURE_KINDS:
                 return {"error": f"Unsupported element kind '{kind}'."}
             element.kind = kind
         if rotation_degrees is not None:
@@ -475,12 +477,12 @@ def tool_update_architectural_element(
         }
 
 
-def tool_delete_architectural_element(element_id: int) -> Dict[str, Any]:
-    logger.info("delete_architectural_element requested: element_id=%s", element_id)
+def tool_delete_fixture(element_id: int) -> Dict[str, Any]:
+    logger.info("delete_fixture requested: element_id=%s", element_id)
     with get_session() as session:
-        element = session.get(ArchitecturalElement, element_id)
+        element = session.get(Fixture, element_id)
         if not element:
-            return {"error": f"Architectural element {element_id} not found."}
+            return {"error": f"Fixture {element_id} not found."}
 
         session.delete(element)
         session.commit()
@@ -499,7 +501,7 @@ def tool_delete_room(room_id: int) -> Dict[str, Any]:
         for p in placements:
             session.delete(p)
 
-        elements = session.exec(select(ArchitecturalElement).where(ArchitecturalElement.room_id == room_id)).all()
+        elements = session.exec(select(Fixture).where(Fixture.room_id == room_id)).all()
         for e in elements:
             session.delete(e)
 
@@ -700,4 +702,365 @@ def tool_add_devices_to_room(room_name: str, description: str, max_devices: int 
         "placed_count": len(placed),
         "devices": placed,
         "errors": errors,
+    }
+
+
+# Chunk size for batch AI queries (leaves room for prompt overhead)
+_BATCH_CHUNK_SIZE = 30
+
+# Delay between consecutive AI API calls to avoid 429 rate limiting (seconds)
+_API_CALL_DELAY = 0.8
+
+
+def _chunked(iterable: List[Any], size: int) -> List[List[Any]]:
+    """Split a list into chunks of at most `size` elements."""
+    return [iterable[i : i + size] for i in range(0, len(iterable), size)]
+
+
+def _call_belongs_in_room_llm(
+    chunk: List[Dict[str, Any]],
+    room_name: str,
+    room_description: str,
+    opencode_token: str,
+) -> List[str]:
+    """Make a single LLM call to decide which devices belong in a room. Retries on 429."""
+    import os
+    from langchain_openai import ChatOpenAI
+
+    OPENCODE_BASE_URL = "https://opencode.ai/zen/go/v1"
+    OPENCODE_MODEL = "deepseek-v4-flash"
+
+    room_context = f"Room name: {room_name}"
+    if room_description:
+        room_context += f". Room description/purpose: {room_description}"
+
+    device_list = "\n".join(
+        f"{i+1}. {d.get('name', '')} | {d['entity_id']} | domain={d.get('domain', '')}"
+        for i, d in enumerate(chunk)
+    )
+    prompt = (
+        f"{room_context}\n\n"
+        f"Here is a list of Home Assistant devices. "
+        f"For each one, decide whether it belongs in this room based on common sense about what devices are found in rooms of this type.\n\n"
+        f"Devices:\n{device_list}\n\n"
+        f"Respond with a JSON array of entity_ids that belong in this room. "
+        f'Example: ["light.living_room","switch.kitchen"]'
+    )
+
+    for attempt in range(3):
+        try:
+            llm = ChatOpenAI(
+                model=OPENCODE_MODEL,
+                api_key=opencode_token,
+                base_url=OPENCODE_BASE_URL,
+                temperature=0,
+            )
+            response = llm.invoke(prompt)
+            raw = response.content.strip() if hasattr(response, "content") else str(response).strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                raw = raw.lstrip("json\n").rstrip("```").strip()
+            result = json.loads(raw)
+            return result if isinstance(result, list) else []
+        except Exception as e:
+            logger.warning("_call_belongs_in_room_llm attempt %d failed for '%s': %s", attempt + 1, room_name, e)
+            if attempt < 2:
+                time.sleep(2 ** attempt)  # exponential backoff
+    return []
+
+
+def _call_suggest_rooms_llm(
+    chunk: List[Dict[str, Any]],
+    opencode_token: str,
+) -> Dict[str, str]:
+    """Make a single LLM call to suggest rooms for devices. Retries on 429."""
+    import os
+    from langchain_openai import ChatOpenAI
+
+    device_list = "\n".join(
+        f"{i+1}. {d.get('name', '')} | {d['entity_id']} | domain={d.get('domain', '')}"
+        for i, d in enumerate(chunk)
+    )
+    prompt = (
+        f"For each device below, suggest a short, common room name (1-3 words) where it would typically be found. "
+        f"Examples: Kitchen, Bedroom, Living Room, Bathroom, Office, Garage, Hallway.\n\n"
+        f"Devices:\n{device_list}\n\n"
+        f'Respond with a JSON object mapping entity_id to room name, e.g.:\n'
+        f'{{"light.kitchen": "Kitchen", "switch.desk": "Office"}}'
+    )
+
+    for attempt in range(3):
+        try:
+            llm = ChatOpenAI(
+                model=OPENCODE_MODEL,
+                api_key=opencode_token,
+                base_url=OPENCODE_BASE_URL,
+                temperature=0,
+            )
+            response = llm.invoke(prompt)
+            raw = response.content.strip() if hasattr(response, "content") else str(response).strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                raw = raw.lstrip("json\n").rstrip("```").strip()
+            result = json.loads(raw)
+            return result if isinstance(result, dict) else {}
+        except Exception as e:
+            logger.warning("_call_suggest_rooms_llm attempt %d failed: %s", attempt + 1, e)
+            if attempt < 2:
+                time.sleep(2 ** attempt)
+    return []
+
+
+def _ai_belongs_in_room_batch(
+    devices: List[Dict[str, Any]],
+    room_name: str,
+    room_description: str = "",
+) -> List[str]:
+    """
+    Ask the AI whether each device belongs in a given room, in chunks to avoid token limits.
+    Returns a list of entity_ids that should be placed in the room.
+    """
+    import os
+
+    opencode_token = os.getenv("OPENCODE_API_KEY")
+    if not opencode_token:
+        logger.warning("_ai_belongs_in_room_batch: no OpenCode API key")
+        return []
+
+    belonging: List[str] = []
+    for i, chunk in enumerate(_chunked(devices, _BATCH_CHUNK_SIZE)):
+        if i > 0:
+            time.sleep(_API_CALL_DELAY)
+        chunk_result = _call_belongs_in_room_llm(chunk, room_name, room_description, opencode_token)
+        if chunk_result:
+            belonging.extend(chunk_result)
+
+    logger.info("_ai_belongs_in_room_batch: %d devices, %d belong in '%s'", len(devices), len(belonging), room_name)
+    return belonging
+
+
+def tool_inspect_and_assign_devices_to_room(room_name: str, room_description: str = "", max_to_assign: int = 20) -> Dict[str, Any]:
+    """
+    Inspect every discovered Home Assistant device, use AI to decide which ones belong
+    in the specified room, and place them. Devices already placed in the room are skipped.
+    Devices are arranged along the room perimeter.
+    Returns a summary of devices assigned and those rejected by the AI.
+    """
+    logger.info("inspect_and_assign_devices_to_room requested: room=%s", room_name)
+
+    room = _get_room_by_name(room_name)
+    if not room:
+        return {"error": f"Room '{room_name}' not found."}
+
+    # Get currently placed entity_ids in this room
+    with get_session() as session:
+        existing_placements = session.exec(
+            select(DevicePlacement).where(DevicePlacement.room_id == room.id)
+        ).all()
+        existing_entity_ids = {p.entity_id for p in existing_placements}
+
+    # Get all discovered devices
+    all_devices = discover_devices()
+    unplaced = [d for d in all_devices if d["entity_id"] not in existing_entity_ids]
+    logger.info("inspect_and_assign_devices_to_room: %d total devices, %d already placed in '%s', %d to evaluate",
+                 len(all_devices), len(existing_entity_ids), room_name, len(unplaced))
+
+    belonging_entity_ids = _ai_belongs_in_room_batch(unplaced, room_name, room_description)
+    belonging_entity_ids_set = set(belonging_entity_ids)
+
+    to_place: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, Any]] = []
+    for d in unplaced:
+        if d["entity_id"] in belonging_entity_ids_set:
+            to_place.append(d)
+        else:
+            rejected.append({"entity_id": d["entity_id"], "name": d.get("name", "")})
+
+    # Place accepted devices along perimeter
+    placed = []
+    errors = []
+    sides = [
+        (0, 0, room.width_m - 0.5, 0),           # bottom wall
+        (room.width_m - 0.5, 0, room.width_m - 0.5, room.height_m - 0.5),  # right wall
+        (0, room.height_m - 0.5, room.width_m - 0.5, room.height_m - 0.5),  # top wall
+        (0, 0, 0, room.height_m - 0.5),            # left wall
+    ]
+    slot_width = 0.6
+
+    for idx, device in enumerate(to_place[:max_to_assign]):
+        side_idx = idx % len(sides)
+        side = sides[side_idx]
+        offset = (idx // len(sides)) * slot_width
+        if side_idx == 0:
+            x, y = side[0] + offset, side[1] + 0.3
+        elif side_idx == 1:
+            x, y = side[0] - 0.3, side[1] + offset
+        elif side_idx == 2:
+            x, y = side[2] - offset, side[3] - 0.3
+        else:
+            x, y = side[0] + 0.3, side[3] - offset
+
+        x = max(0.2, min(room.width_m - 0.2, x))
+        y = max(0.2, min(room.height_m - 0.2, y))
+
+        result = tool_place_device(room_name, device["entity_id"], device["name"], x, y)
+        if "error" in result:
+            errors.append({"entity_id": device["entity_id"], "error": result["error"]})
+        else:
+            placed.append({"entity_id": device["entity_id"], "label": device["name"], "x_m": x, "y_m": y})
+
+    logger.info("inspect_and_assign_devices_to_room: assigned=%d rejected=%d already_placed=%d",
+                 len(placed), len(rejected), len(existing_entity_ids))
+    return {
+        "room": room_name,
+        "assigned_count": len(placed),
+        "rejected_count": len(rejected),
+        "already_placed_count": len(existing_entity_ids),
+        "devices": placed,
+        "rejected": rejected,
+        "errors": errors,
+    }
+
+
+def _ai_suggest_room_for_device(device_name: str, entity_id: str, domain: str) -> Optional[str]:
+    """
+    Ask the AI to suggest a room name for a device that has no HA area.
+    Returns a short room name (e.g. "Kitchen", "Bedroom") or None on failure.
+    """
+    import os
+    try:
+        from langchain_openai import ChatOpenAI
+        opencode_token = os.getenv("OPENCODE_API_KEY")
+        if not opencode_token:
+            return None
+
+        llm = ChatOpenAI(
+            model="deepseek-v4-flash",
+            api_key=opencode_token,
+            base_url="https://opencode.ai/zen/go/v1",
+            temperature=0,
+        )
+
+        prompt = (
+            f"A Home Assistant device has the following properties:\n"
+            f"  - Name: {device_name}\n"
+            f"  - Entity ID: {entity_id}\n"
+            f"  - Domain: {domain}\n\n"
+            f"Suggest a short, common room name (1-3 words) where this device would typically be found. "
+            f"Examples: Kitchen, Bedroom, Living Room, Bathroom, Office, Garage, Hallway. "
+            f"Respond with ONLY the room name, no explanation."
+        )
+
+        response = llm.invoke(prompt)
+        answer = response.content.strip() if hasattr(response, "content") else str(response).strip()
+        # Sanitize: take first line, strip whitespace, limit length
+        suggested = answer.split("\n")[0].strip()[:30]
+        logger.info("_ai_suggest_room_for_device: %s -> '%s'", entity_id, suggested)
+        return suggested if suggested else None
+    except Exception as e:
+        logger.error("_ai_suggest_room_for_device failed for %s: %s", entity_id, e)
+        return None
+
+
+def _ai_suggest_rooms_batch(devices: List[Dict[str, Any]]) -> Dict[str, str]:
+    """
+    Ask the AI to suggest a room name for each unassigned device, in chunks to avoid token limits.
+    Returns a dict mapping entity_id -> suggested room name.
+    """
+    import os
+
+    opencode_token = os.getenv("OPENCODE_API_KEY")
+    if not opencode_token:
+        return {}
+
+    suggestions: Dict[str, str] = {}
+    for i, chunk in enumerate(_chunked(devices, _BATCH_CHUNK_SIZE)):
+        if i > 0:
+            time.sleep(_API_CALL_DELAY)
+        chunk_result = _call_suggest_rooms_llm(chunk, opencode_token)
+        if chunk_result:
+            suggestions.update(chunk_result)
+
+    logger.info("_ai_suggest_rooms_batch: %d devices -> %d suggestions", len(devices), len(suggestions))
+    return suggestions
+
+
+def tool_generate_rooms_from_devices(default_width_m: float = 4.0, default_height_m: float = 3.0) -> Dict[str, Any]:
+    """
+    Discover all Home Assistant devices, group them by HA area, create rooms for each
+    area (if they don't already exist), and use AI to place devices into their rooms.
+    Devices without an HA area are assigned a room name by AI evaluation of the device name.
+    Returns a summary of rooms created/updated and devices placed.
+    """
+    logger.info("generate_rooms_from_devices requested: default_width=%.2f height=%.2f", default_width_m, default_height_m)
+
+    all_devices = discover_devices()
+    if not all_devices:
+        return {"error": "No devices found in Home Assistant."}
+
+    # Group devices by HA area
+    areas: Dict[str, List[Dict[str, Any]]] = {}
+    for device in all_devices:
+        area = device.get("area") or ""
+        if not area:
+            area = "__unassigned__"
+        areas.setdefault(area, []).append(device)
+
+    # For unassigned devices, batch AI query to suggest room names
+    unassigned = areas.pop("__unassigned__", [])
+    if unassigned:
+        ai_suggested_areas: Dict[str, List[Dict[str, Any]]] = {}
+        suggestions = _ai_suggest_rooms_batch(unassigned)
+        for device in unassigned:
+            area_key = suggestions.get(device["entity_id"]) or "Unassigned Room"
+            ai_suggested_areas.setdefault(area_key, []).append(device)
+        areas.update(ai_suggested_areas)
+
+    # Get existing room names
+    existing_rooms = tool_list_rooms()
+    existing_room_names: Set[str] = {r["name"] for r in existing_rooms}
+
+    rooms_created = 0
+    rooms_updated = 0
+    all_placed: List[Dict[str, Any]] = []
+    all_rejected: List[Dict[str, Any]] = []
+    room_details: List[Dict[str, Any]] = []
+
+    for area_name, devices in areas.items():
+        # Create room if it doesn't exist
+        if area_name not in existing_room_names:
+            create_result = tool_create_room(area_name, default_width_m, default_height_m)
+            if "error" in create_result:
+                logger.warning("generate_rooms_from_devices: failed to create room '%s': %s", area_name, create_result["error"])
+                continue
+            rooms_created += 1
+            existing_room_names.add(area_name)
+        else:
+            rooms_updated += 1
+
+        # Inspect and assign devices to this room (now uses batch AI call)
+        assign_result = tool_inspect_and_assign_devices_to_room(
+            room_name=area_name,
+            room_description="",
+            max_to_assign=len(devices),
+        )
+        all_placed.extend(assign_result.get("devices", []))
+        all_rejected.extend(assign_result.get("rejected", []))
+        room_details.append({
+            "room": area_name,
+            "device_count": len(devices),
+            "assigned": len(assign_result.get("devices", [])),
+            "rejected": len(assign_result.get("rejected", [])),
+        })
+
+    logger.info("generate_rooms_from_devices complete: created=%d updated=%d placed=%d rejected=%d",
+                rooms_created, rooms_updated, len(all_placed), len(all_rejected))
+    return {
+        "rooms_created": rooms_created,
+        "rooms_updated": rooms_updated,
+        "total_devices_placed": len(all_placed),
+        "total_devices_rejected": len(all_rejected),
+        "room_details": room_details,
+        "placed_devices": all_placed,
+        "rejected_devices": all_rejected,
     }

@@ -1,11 +1,11 @@
 from app.database import init_db
 from app.tools import (
     tool_create_room,
-    tool_insert_architectural_element,
+    tool_insert_fixture,
     tool_place_device,
     tool_resize_room,
     tool_render_room_map,
-    tool_update_architectural_element,
+    tool_update_fixture,
 )
 from uuid import uuid4
 
@@ -25,25 +25,25 @@ def test_create_place_render_cycle() -> None:
     assert len(room_map["placements"]) >= 1
 
 
-def test_insert_architectural_element_default_length_and_update() -> None:
+def test_insert_fixture_default_length_and_update() -> None:
     init_db()
-    room_name = f"Arch Room {uuid4().hex[:8]}"
+    room_name = f"Fixture Room {uuid4().hex[:8]}"
     created = tool_create_room(room_name, 4.0, 3.0)
     assert "error" not in created
 
-    inserted = tool_insert_architectural_element(room_name, "wall", 1.0, 1.0)
+    inserted = tool_insert_fixture(room_name, "wall", 1.0, 1.0)
     assert "error" not in inserted
     assert abs(inserted["length_m"] - 0.9144) < 1e-6
     assert abs(inserted["thickness_m"] - 0.3048) < 1e-6
 
-    updated = tool_update_architectural_element(inserted["id"], kind="door", rotation_degrees=90.0)
+    updated = tool_update_fixture(inserted["id"], kind="door", rotation_degrees=90.0)
     assert "error" not in updated
     assert updated["kind"] == "door"
     assert updated["rotation_degrees"] == 90.0
 
     room_map = tool_render_room_map(room_name)
     assert "error" not in room_map
-    assert any(e["id"] == inserted["id"] for e in room_map.get("architectural_elements", []))
+    assert any(e["id"] == inserted["id"] for e in room_map.get("fixtures", []))
 
 
 def test_resize_room_repositions_only_out_of_bounds_items() -> None:
@@ -57,32 +57,32 @@ def test_resize_room_repositions_only_out_of_bounds_items() -> None:
     to_move = tool_place_device(room_name, "sensor.move", "Move Sensor", 5.5, 3.8)
     assert "error" not in to_move
 
-    arch_keep = tool_insert_architectural_element(room_name, "wall", 2.0, 2.0)
-    assert "error" not in arch_keep
-    arch_move = tool_insert_architectural_element(room_name, "door", 5.8, 3.9)
-    assert "error" not in arch_move
+    fixture_keep = tool_insert_fixture(room_name, "wall", 2.0, 2.0)
+    assert "error" not in fixture_keep
+    fixture_move = tool_insert_fixture(room_name, "door", 5.8, 3.9)
+    assert "error" not in fixture_move
 
     resized = tool_resize_room(room_name, 3.0, 2.0)
     assert "error" not in resized
     assert resized["repositioned_placements"] == 1
-    assert resized["repositioned_architectural_elements"] == 1
+    assert resized["repositioned_fixtures"] == 1
 
     room_map = tool_render_room_map(room_name)
     assert "error" not in room_map
 
     kept_placement = next(p for p in room_map["placements"] if p["id"] == in_bounds["id"])
     moved_placement = next(p for p in room_map["placements"] if p["id"] == to_move["id"])
-    kept_arch = next(e for e in room_map["architectural_elements"] if e["id"] == arch_keep["id"])
-    moved_arch = next(e for e in room_map["architectural_elements"] if e["id"] == arch_move["id"])
+    kept_fixture = next(e for e in room_map["fixtures"] if e["id"] == fixture_keep["id"])
+    moved_fixture = next(e for e in room_map["fixtures"] if e["id"] == fixture_move["id"])
 
     assert kept_placement["x_m"] == 1.0
     assert kept_placement["y_m"] == 1.0
     assert moved_placement["x_m"] == 1.5
     assert moved_placement["y_m"] == 1.0
-    assert kept_arch["x_m"] == 2.0
-    assert kept_arch["y_m"] == 2.0
-    assert moved_arch["x_m"] == 1.5
-    assert moved_arch["y_m"] == 1.0
+    assert kept_fixture["x_m"] == 2.0
+    assert kept_fixture["y_m"] == 2.0
+    assert moved_fixture["x_m"] == 1.5
+    assert moved_fixture["y_m"] == 1.0
 
 
 def test_resize_room_rejects_non_positive_dimensions() -> None:

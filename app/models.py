@@ -25,7 +25,8 @@ class DevicePlacement(SQLModel, table=True):
     y_m: float
 
 
-class ArchitecturalElement(SQLModel, table=True):
+class Fixture(SQLModel, table=True):
+    __tablename__ = "fixture"
     id: Optional[int] = Field(default=None, primary_key=True)
     room_id: int = Field(index=True)
     kind: str = Field(default="wall", index=True)

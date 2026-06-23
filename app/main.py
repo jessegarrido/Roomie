@@ -1,5 +1,6 @@
 import logging
 from time import perf_counter
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
@@ -8,10 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from .database import init_db
 from .logging_config import configure_logging
 from .schemas import (
-    ArchitecturalElementOut,
+    FixtureOut,
     ChatRequest,
     ChatResponse,
-    CreateArchitecturalElementRequest,
+    CreateFixtureRequest,
     CreatePlacementRequest,
     DeviceOut,
     DeviceSearchRequest,
@@ -25,18 +26,18 @@ from .schemas import (
     RoomCreate,
     RoomMap,
     RoomOut,
-    UpdateArchitecturalElementRequest,
+    UpdateFixtureRequest,
 )
 from .agent import process_chat_with_langchain
 from .tools import (
     tool_assign_room_to_floor,
     tool_create_floor,
-    tool_delete_architectural_element,
+    tool_delete_fixture,
     tool_delete_device,
     tool_delete_floor,
     tool_delete_room,
     tool_discover_devices,
-    tool_insert_architectural_element_by_room_id,
+    tool_insert_fixture_by_room_id,
     tool_list_floors,
     tool_list_rooms,
     tool_move_device,
@@ -46,13 +47,20 @@ from .tools import (
     tool_render_room_map_by_id,
     tool_resize_room_by_id,
     tool_search_devices,
-    tool_update_architectural_element,
+    tool_update_fixture,
 )
 
 configure_logging()
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="HA Agent Capstone API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    logger.info("Application startup complete")
+    yield
+
+
+app = FastAPI(title="HA Agent Capstone API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -61,12 +69,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-def on_startup() -> None:
-    init_db()
-    logger.info("Application startup complete")
 
 
 @app.middleware("http")
@@ -98,7 +100,7 @@ def list_tools() -> dict:
             "list_rooms",
             "place_device",
             "move_device",
-            "insert_architectural_element",
+            "insert_fixture",
             "resize_room",
             "render_room_map",
             "create_floor",
@@ -121,9 +123,9 @@ def search_devices(req: DeviceSearchRequest) -> dict:
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest) -> ChatResponse:
+async def chat(req: ChatRequest) -> ChatResponse:
     logger.info("Chat request received: %s", req.message)
-    result = process_chat_with_langchain(req.message)
+    result = await process_chat_with_langchain(req.message, history=req.history)
     logger.info("Chat response generated")
     return ChatResponse(**result)
 
@@ -243,9 +245,9 @@ def create_placement(room_id: int, req: CreatePlacementRequest) -> PlacementOut:
     return PlacementOut(**result)
 
 
-@app.post("/rooms/{room_id}/architectural-elements", response_model=ArchitecturalElementOut)
-def create_architectural_element(room_id: int, req: CreateArchitecturalElementRequest) -> ArchitecturalElementOut:
-    result = tool_insert_architectural_element_by_room_id(
+@app.post("/rooms/{room_id}/fixtures", response_model=FixtureOut)
+def create_fixture(room_id: int, req: CreateFixtureRequest) -> FixtureOut:
+    result = tool_insert_fixture_by_room_id(
         room_id=room_id,
         kind=req.kind,
         x_m=req.x_m,
@@ -258,7 +260,7 @@ def create_architectural_element(room_id: int, req: CreateArchitecturalElementRe
         detail = result["error"]
         status_code = 404 if "not found" in detail.lower() else 400
         raise HTTPException(status_code=status_code, detail=detail)
-    return ArchitecturalElementOut(**result)
+    return FixtureOut(**result)
 
 
 @app.patch("/placements/{placement_id}", response_model=PlacementOut)
@@ -271,9 +273,9 @@ def move_placement(placement_id: int, req: MovePlacementRequest) -> PlacementOut
     return PlacementOut(**result)
 
 
-@app.patch("/architectural-elements/{element_id}", response_model=ArchitecturalElementOut)
-def update_architectural_element(element_id: int, req: UpdateArchitecturalElementRequest) -> ArchitecturalElementOut:
-    result = tool_update_architectural_element(
+@app.patch("/fixtures/{element_id}", response_model=FixtureOut)
+def update_fixture(element_id: int, req: UpdateFixtureRequest) -> FixtureOut:
+    result = tool_update_fixture(
         element_id=element_id,
         kind=req.kind,
         rotation_degrees=req.rotation_degrees,
@@ -286,12 +288,12 @@ def update_architectural_element(element_id: int, req: UpdateArchitecturalElemen
         detail = result["error"]
         status_code = 404 if "not found" in detail.lower() else 400
         raise HTTPException(status_code=status_code, detail=detail)
-    return ArchitecturalElementOut(**result)
+    return FixtureOut(**result)
 
 
-@app.delete("/architectural-elements/{element_id}")
-def delete_architectural_element(element_id: int) -> dict:
-    result = tool_delete_architectural_element(element_id=element_id)
+@app.delete("/fixtures/{element_id}")
+def delete_fixture(element_id: int) -> dict:
+    result = tool_delete_fixture(element_id=element_id)
     if "error" in result:
         raise HTTPException(status_code=404, detail=result["error"])
     return result

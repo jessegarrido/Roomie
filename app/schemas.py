@@ -4,6 +4,7 @@ from pydantic import BaseModel
 
 class ChatRequest(BaseModel):
     message: str
+    history: List[dict] = []
 
 
 class DeviceOut(BaseModel):
@@ -76,7 +77,7 @@ class CreatePlacementRequest(BaseModel):
     y_m: float
 
 
-class CreateArchitecturalElementRequest(BaseModel):
+class CreateFixtureRequest(BaseModel):
     kind: str = "wall"
     x_m: float
     y_m: float
@@ -85,7 +86,7 @@ class CreateArchitecturalElementRequest(BaseModel):
     rotation_degrees: float = 0.0
 
 
-class UpdateArchitecturalElementRequest(BaseModel):
+class UpdateFixtureRequest(BaseModel):
     kind: Optional[str] = None
     rotation_degrees: Optional[float] = None
     x_m: Optional[float] = None
@@ -111,7 +112,7 @@ class PlacementOut(BaseModel):
     state: Optional[str] = None
 
 
-class ArchitecturalElementOut(BaseModel):
+class FixtureOut(BaseModel):
     id: int
     kind: str
     rotation_degrees: float
@@ -124,7 +125,7 @@ class ArchitecturalElementOut(BaseModel):
 class RoomMap(BaseModel):
     room: RoomOut
     placements: List[PlacementOut]
-    architectural_elements: List[ArchitecturalElementOut] = []
+    fixtures: List[FixtureOut] = []
 
 
 class ChatResponse(BaseModel):
