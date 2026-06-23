@@ -1,5 +1,0 @@
-.env
-ha_agent.db
-.pytest_cache/
-__pycache__/
-.venv/
