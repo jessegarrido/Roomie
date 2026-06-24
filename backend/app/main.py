@@ -20,6 +20,7 @@ from .schemas import (
     FloorOut,
     MovePlacementRequest,
     PlacementOut,
+    ResizePlacementRequest,
     RenameFloorRequest,
     RenameRoomRequest,
     ResizeRoomRequest,
@@ -27,6 +28,7 @@ from .schemas import (
     RoomMap,
     RoomOut,
     UpdateFixtureRequest,
+    UpdatePlacementTypeRequest,
 )
 from .agent import process_chat_with_langchain
 from .tools import (
@@ -42,6 +44,8 @@ from .tools import (
     tool_list_rooms,
     tool_move_device,
     tool_place_device_by_room_id,
+    tool_resize_placement,
+    tool_update_placement_type,
     tool_rename_floor,
     tool_rename_room,
     tool_render_room_map_by_id,
@@ -266,6 +270,26 @@ def create_fixture(room_id: int, req: CreateFixtureRequest) -> FixtureOut:
 @app.patch("/placements/{placement_id}", response_model=PlacementOut)
 def move_placement(placement_id: int, req: MovePlacementRequest) -> PlacementOut:
     result = tool_move_device(placement_id=placement_id, x_m=req.x_m, y_m=req.y_m)
+    if "error" in result:
+        detail = result["error"]
+        status_code = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail)
+    return PlacementOut(**result)
+
+
+@app.put("/placements/{placement_id}/size", response_model=PlacementOut)
+def resize_placement(placement_id: int, req: ResizePlacementRequest) -> PlacementOut:
+    result = tool_resize_placement(placement_id=placement_id, size_m=req.size_m)
+    if "error" in result:
+        detail = result["error"]
+        status_code = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail)
+    return PlacementOut(**result)
+
+
+@app.patch("/placements/{placement_id}/type", response_model=PlacementOut)
+def update_placement_type(placement_id: int, req: UpdatePlacementTypeRequest) -> PlacementOut:
+    result = tool_update_placement_type(placement_id=placement_id, device_type=req.device_type)
     if "error" in result:
         detail = result["error"]
         status_code = 404 if "not found" in detail.lower() else 400

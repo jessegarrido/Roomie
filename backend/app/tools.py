@@ -215,27 +215,60 @@ def _get_room_by_id(room_id: int) -> Optional[Room]:
         return session.get(Room, room_id)
 
 
+def _enrich_placement(placement: DevicePlacement) -> Dict[str, Any]:
+    """Build a placement dict enriched with device metadata from Home Assistant."""
+    device_meta = {d["entity_id"]: d for d in discover_devices()}
+    device_states = get_device_states()
+    meta = device_meta.get(placement.entity_id, {})
+    domain = meta.get("domain") or (placement.entity_id.split(".")[0] if "." in placement.entity_id else None)
+    # Derive device_type from domain if not overridden by user
+    if placement.device_type:
+        device_type = placement.device_type
+    else:
+        device_type = _derive_device_type(placement.entity_id, domain)
+    return {
+        "id": placement.id,
+        "room_id": placement.room_id,
+        "entity_id": placement.entity_id,
+        "label": placement.label,
+        "x_m": placement.x_m,
+        "y_m": placement.y_m,
+        "size_m": placement.size_m,
+        "state": device_states.get(placement.entity_id),
+        "domain": domain,
+        "area": meta.get("area"),
+        "device_type": device_type,
+        "device_type_override": placement.device_type,
+    }
+
+
+def _derive_device_type(entity_id: str, domain: Optional[str]) -> str:
+    """Derive a device type from the entity_id domain."""
+    if not domain:
+        domain = entity_id.split(".")[0] if "." in entity_id else ""
+    # Map known domains to device types
+    domain_map = {
+        "light": "light",
+        "fan": "fan",
+        "switch": "switch",
+        "sensor": "sensor",
+        "media_player": "speaker",
+        "remote": "computer",
+        "computer": "computer",
+        "device_tracker": "computer",
+        "plug": "plug",
+    }
+    return domain_map.get(domain, "default")
+
+
 def _build_room_map(room: Room) -> Dict[str, Any]:
     with get_session() as session:
         placements = session.exec(select(DevicePlacement).where(DevicePlacement.room_id == room.id)).all()
         elements = session.exec(select(Fixture).where(Fixture.room_id == room.id)).all()
 
-        # Enrich placements with current device state from Home Assistant
-        device_states = get_device_states()
-
         return {
             "room": {"id": room.id, "name": room.name, "width_m": room.width_m, "height_m": room.height_m, "floor_id": room.floor_id},
-            "placements": [
-                {
-                    "id": p.id,
-                    "entity_id": p.entity_id,
-                    "label": p.label,
-                    "x_m": p.x_m,
-                    "y_m": p.y_m,
-                    "state": device_states.get(p.entity_id),
-                }
-                for p in placements
-            ],
+            "placements": [_enrich_placement(p) for p in placements],
             "fixtures": [
                 {
                     "id": e.id,
@@ -276,14 +309,7 @@ def tool_place_device(room_name: str, entity_id: str, label: str, x_m: float, y_
         session.commit()
         session.refresh(placement)
         logger.info("place_device created placement id=%s", placement.id)
-        return {
-            "id": placement.id,
-            "room_id": placement.room_id,
-            "entity_id": placement.entity_id,
-            "label": placement.label,
-            "x_m": placement.x_m,
-            "y_m": placement.y_m,
-        }
+        return _enrich_placement(placement)
 
 
 def tool_place_device_by_room_id(room_id: int, entity_id: str, label: str, x_m: float, y_m: float) -> Dict[str, Any]:
@@ -321,14 +347,23 @@ def tool_move_device(placement_id: int, x_m: float, y_m: float) -> Dict[str, Any
         session.commit()
         session.refresh(placement)
         logger.info("move_device updated placement id=%s", placement.id)
-        return {
-            "id": placement.id,
-            "room_id": placement.room_id,
-            "entity_id": placement.entity_id,
-            "label": placement.label,
-            "x_m": placement.x_m,
-            "y_m": placement.y_m,
-        }
+        return _enrich_placement(placement)
+
+
+def tool_resize_placement(placement_id: int, size_m: float) -> Dict[str, Any]:
+    logger.info("resize_placement requested: placement_id=%s size=%.2f", placement_id, size_m)
+    with get_session() as session:
+        placement = session.get(DevicePlacement, placement_id)
+        if not placement:
+            logger.warning("resize_placement failed; placement not found: %s", placement_id)
+            return {"error": f"Placement {placement_id} not found."}
+
+        placement.size_m = size_m
+        session.add(placement)
+        session.commit()
+        session.refresh(placement)
+        logger.info("resize_placement updated placement id=%s", placement.id)
+        return _enrich_placement(placement)
 
 
 def tool_delete_device(placement_id: int) -> Dict[str, Any]:
@@ -343,6 +378,22 @@ def tool_delete_device(placement_id: int) -> Dict[str, Any]:
         session.commit()
         logger.info("delete_device removed placement id=%s", placement_id)
         return {"ok": True, "id": placement_id}
+
+
+def tool_update_placement_type(placement_id: int, device_type: Optional[str]) -> Dict[str, Any]:
+    logger.info("update_placement_type requested: placement_id=%s device_type=%s", placement_id, device_type)
+    with get_session() as session:
+        placement = session.get(DevicePlacement, placement_id)
+        if not placement:
+            logger.warning("update_placement_type failed; placement not found: %s", placement_id)
+            return {"error": f"Placement {placement_id} not found."}
+
+        placement.device_type = device_type
+        session.add(placement)
+        session.commit()
+        session.refresh(placement)
+        logger.info("update_placement_type updated placement id=%s", placement.id)
+        return _enrich_placement(placement)
 
 
 def tool_insert_fixture(

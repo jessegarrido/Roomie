@@ -77,6 +77,24 @@ def init_db() -> None:
                 )
                 conn.commit()
 
+        # Ensure deviceplacement has size_m column
+        dp_exists = conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='deviceplacement'"
+        ).first()
+        if dp_exists:
+            dp_cols = conn.exec_driver_sql("PRAGMA table_info('deviceplacement')").fetchall()
+            dp_col_names = {row[1] for row in dp_cols}
+            if "size_m" not in dp_col_names:
+                conn.exec_driver_sql(
+                    "ALTER TABLE deviceplacement ADD COLUMN size_m FLOAT DEFAULT 0.1"
+                )
+                conn.commit()
+            if "device_type" not in dp_col_names:
+                conn.exec_driver_sql(
+                    "ALTER TABLE deviceplacement ADD COLUMN device_type TEXT"
+                )
+                conn.commit()
+
 
 def get_session() -> Session:
     return Session(engine)

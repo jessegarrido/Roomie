@@ -23,6 +23,9 @@ class DevicePlacement(SQLModel, table=True):
     label: str
     x_m: float
     y_m: float
+    size_m: float = Field(default=0.1)
+    device_type: Optional[str] = Field(default=None)
+    # When None, type is derived from entity_id domain. When set, overrides the derived type.
 
 
 class Fixture(SQLModel, table=True):

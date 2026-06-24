@@ -57,6 +57,10 @@ class MovePlacementRequest(BaseModel):
     y_m: float
 
 
+class ResizePlacementRequest(BaseModel):
+    size_m: float
+
+
 class ResizeRoomRequest(BaseModel):
     width_m: float
     height_m: float
@@ -109,7 +113,16 @@ class PlacementOut(BaseModel):
     label: str
     x_m: float
     y_m: float
+    size_m: float = 0.1
     state: Optional[str] = None
+    domain: Optional[str] = None
+    area: Optional[str] = None
+    device_type: Optional[str] = None
+    device_type_override: Optional[str] = None
+
+
+class UpdatePlacementTypeRequest(BaseModel):
+    device_type: Optional[str] = None
 
 
 class FixtureOut(BaseModel):
