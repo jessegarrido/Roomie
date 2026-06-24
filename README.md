@@ -1,6 +1,4 @@
-# HA Agent Capstone (Chat + Tool Calling)
-
-This workspace is a beginner-friendly capstone starter:
+# Roomie - HA Room Planning Agent (Chat + Tool Calling)
 
 - Frontend: Next.js chat UI with room map preview.
 - Backend: FastAPI tool-calling API with SQLite persistence.
