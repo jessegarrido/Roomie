@@ -144,3 +144,13 @@ class RoomMap(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     map_data: Optional[RoomMap] = None
+
+
+class AutoAssignRequest(BaseModel):
+    room_description: str = ""
+    max_to_assign: int = 50
+
+
+class AutoGenerateRoomsRequest(BaseModel):
+    default_width_m: float = 4.0
+    default_height_m: float = 3.0

@@ -6,7 +6,7 @@ from sqlmodel import select
 
 from .database import get_session
 from .models import Fixture, Floor, Room, DevicePlacement
-from .ha_client import discover_devices, get_device_states
+from .ha_client import discover_devices
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +15,10 @@ _embedding_model = None
 
 # In-memory cache for discovered devices and their embeddings (refreshed on demand)
 _device_cache: Optional[Dict[str, Any]] = None
+
+# Cache of device metadata keyed by entity_id, populated by tool_discover_devices().
+# Used by _enrich_placement() to avoid making HA API calls on every place/move/render.
+_device_meta_cache: Dict[str, Dict[str, Any]] = {}
 
 
 def _get_embedding_model():
@@ -30,9 +34,27 @@ DEFAULT_ELEMENT_LENGTH_M = 3 * 0.3048
 DEFAULT_ELEMENT_THICKNESS_M = 1 * 0.3048
 
 
+def _populate_device_meta_cache(devices: List[Dict[str, Any]]) -> None:
+    """Build an entity_id -> device-metadata dict from a discovery result list."""
+    global _device_meta_cache
+    _device_meta_cache = {d["entity_id"]: d for d in devices}
+    logger.debug("Device meta cache populated: %d devices", len(_device_meta_cache))
+
+
+def _get_device_meta(entity_id: str) -> Dict[str, Any]:
+    """Return cached metadata for a device, deriving domain from entity_id if not cached."""
+    meta = _device_meta_cache.get(entity_id, {})
+    if not meta:
+        # Derive domain from entity_id as a fallback
+        domain = entity_id.split(".")[0] if "." in entity_id else None
+        meta = {"entity_id": entity_id, "domain": domain, "area": None, "state": None}
+    return meta
+
+
 def tool_discover_devices() -> List[Dict[str, Any]]:
     devices = discover_devices()
     logger.info("discover_devices returned %d devices", len(devices))
+    _populate_device_meta_cache(devices)
     return devices
 
 
@@ -216,10 +238,13 @@ def _get_room_by_id(room_id: int) -> Optional[Room]:
 
 
 def _enrich_placement(placement: DevicePlacement) -> Dict[str, Any]:
-    """Build a placement dict enriched with device metadata from Home Assistant."""
-    device_meta = {d["entity_id"]: d for d in discover_devices()}
-    device_states = get_device_states()
-    meta = device_meta.get(placement.entity_id, {})
+    """Build a placement dict enriched with device metadata.
+
+    Uses the in-memory device metadata cache populated by tool_discover_devices().
+    Falls back to deriving domain from entity_id if the cache is empty.
+    No direct Home Assistant API calls are made here.
+    """
+    meta = _get_device_meta(placement.entity_id)
     domain = meta.get("domain") or (placement.entity_id.split(".")[0] if "." in placement.entity_id else None)
     # Derive device_type from domain if not overridden by user
     if placement.device_type:
@@ -234,7 +259,7 @@ def _enrich_placement(placement: DevicePlacement) -> Dict[str, Any]:
         "x_m": placement.x_m,
         "y_m": placement.y_m,
         "size_m": placement.size_m,
-        "state": device_states.get(placement.entity_id),
+        "state": meta.get("state"),
         "domain": domain,
         "area": meta.get("area"),
         "device_type": device_type,
@@ -540,6 +565,48 @@ def tool_delete_fixture(element_id: int) -> Dict[str, Any]:
         return {"ok": True, "id": element_id}
 
 
+def tool_remove_all_devices_from_room(room_name: str) -> Dict[str, Any]:
+    """Remove every device placement from a room. Fixtures (walls, doors, etc.) are preserved."""
+    logger.info("remove_all_devices_from_room requested: room=%s", room_name)
+
+    room = _get_room_by_name(room_name)
+    if not room:
+        return {"error": f"Room '{room_name}' not found."}
+
+    with get_session() as session:
+        placements = session.exec(
+            select(DevicePlacement).where(DevicePlacement.room_id == room.id)
+        ).all()
+        count = len(placements)
+        for p in placements:
+            session.delete(p)
+        session.commit()
+
+    logger.info("remove_all_devices_from_room: removed %d placements from '%s'", count, room_name)
+    return {"ok": True, "room": room_name, "removed_count": count}
+
+
+def tool_remove_all_fixtures_from_room(room_name: str) -> Dict[str, Any]:
+    """Remove every fixture (wall, door, window, etc.) from a room. Device placements are preserved."""
+    logger.info("remove_all_fixtures_from_room requested: room=%s", room_name)
+
+    room = _get_room_by_name(room_name)
+    if not room:
+        return {"error": f"Room '{room_name}' not found."}
+
+    with get_session() as session:
+        elements = session.exec(
+            select(Fixture).where(Fixture.room_id == room.id)
+        ).all()
+        count = len(elements)
+        for e in elements:
+            session.delete(e)
+        session.commit()
+
+    logger.info("remove_all_fixtures_from_room: removed %d fixtures from '%s'", count, room_name)
+    return {"ok": True, "room": room_name, "removed_count": count}
+
+
 def tool_delete_room(room_id: int) -> Dict[str, Any]:
     logger.info("delete_room requested: room_id=%s", room_id)
     with get_session() as session:
@@ -652,7 +719,7 @@ def _get_device_cache() -> Dict[str, Any]:
     """Return cached device list with pre-computed embeddings, rebuilding if needed."""
     global _device_cache
     if _device_cache is None or _device_cache.get("needs_refresh", False):
-        devices = discover_devices()
+        devices = tool_discover_devices()
         texts = [f"{d['name']} {d['entity_id']} {d['domain']} {d.get('area', '') or ''}" for d in devices]
         model = _get_embedding_model()
         embeddings = model.encode(texts, normalize_embeddings=True)
@@ -756,11 +823,11 @@ def tool_add_devices_to_room(room_name: str, description: str, max_devices: int 
     }
 
 
-# Chunk size for batch AI queries (leaves room for prompt overhead)
-_BATCH_CHUNK_SIZE = 30
+# Chunk size for batch AI queries (GLM 5.1 handles large context well)
+_BATCH_CHUNK_SIZE = 100
 
 # Delay between consecutive AI API calls to avoid 429 rate limiting (seconds)
-_API_CALL_DELAY = 0.8
+_API_CALL_DELAY = 0.2
 
 
 def _chunked(iterable: List[Any], size: int) -> List[List[Any]]:
@@ -779,23 +846,24 @@ def _call_belongs_in_room_llm(
     from langchain_openai import ChatOpenAI
 
     OPENCODE_BASE_URL = "https://opencode.ai/zen/go/v1"
-    OPENCODE_MODEL = "deepseek-v4-flash"
+    OPENCODE_MODEL = "glm-5.1"
 
     room_context = f"Room name: {room_name}"
     if room_description:
         room_context += f". Room description/purpose: {room_description}"
 
     device_list = "\n".join(
-        f"{i+1}. {d.get('name', '')} | {d['entity_id']} | domain={d.get('domain', '')}"
+        f"{i+1}. {d.get('name', '')} | domain={d.get('domain', '')} | area={d.get('area', '') or 'N/A'}"
         for i, d in enumerate(chunk)
     )
     prompt = (
         f"{room_context}\n\n"
         f"Here is a list of Home Assistant devices. "
-        f"For each one, decide whether it belongs in this room based on common sense about what devices are found in rooms of this type.\n\n"
+        f"For each one, decide whether it belongs in this room based on the device name, domain, and assigned area. "
+        f"Use common sense about what devices are found in rooms of this type.\n\n"
         f"Devices:\n{device_list}\n\n"
-        f"Respond with a JSON array of entity_ids that belong in this room. "
-        f'Example: ["light.living_room","switch.kitchen"]'
+        f"Respond with a JSON array of the numbers (from the list above) of devices that belong in this room. "
+        f'Example: [1, 3, 5]'
     )
 
     for attempt in range(3):
@@ -812,7 +880,15 @@ def _call_belongs_in_room_llm(
                 raw = raw.split("```")[1]
                 raw = raw.lstrip("json\n").rstrip("```").strip()
             result = json.loads(raw)
-            return result if isinstance(result, list) else []
+            if not isinstance(result, list):
+                return []
+            # Map indices (1-based) back to entity_ids
+            entity_ids: List[str] = []
+            for item in result:
+                idx = int(item) - 1 if isinstance(item, (int, str)) else -1
+                if 0 <= idx < len(chunk):
+                    entity_ids.append(chunk[idx]["entity_id"])
+            return entity_ids
         except Exception as e:
             logger.warning("_call_belongs_in_room_llm attempt %d failed for '%s': %s", attempt + 1, room_name, e)
             if attempt < 2:
@@ -829,15 +905,16 @@ def _call_suggest_rooms_llm(
     from langchain_openai import ChatOpenAI
 
     device_list = "\n".join(
-        f"{i+1}. {d.get('name', '')} | {d['entity_id']} | domain={d.get('domain', '')}"
+        f"{i+1}. {d.get('name', '')} | domain={d.get('domain', '')} | area={d.get('area', '') or 'N/A'}"
         for i, d in enumerate(chunk)
     )
     prompt = (
         f"For each device below, suggest a short, common room name (1-3 words) where it would typically be found. "
+        f"Consider the device name, domain, and assigned area. "
         f"Examples: Kitchen, Bedroom, Living Room, Bathroom, Office, Garage, Hallway.\n\n"
         f"Devices:\n{device_list}\n\n"
-        f'Respond with a JSON object mapping entity_id to room name, e.g.:\n'
-        f'{{"light.kitchen": "Kitchen", "switch.desk": "Office"}}'
+        f'Respond with a JSON object mapping device number to room name, e.g.:\n'
+        f'{{"1": "Kitchen", "2": "Office"}}'
     )
 
     for attempt in range(3):
@@ -854,12 +931,136 @@ def _call_suggest_rooms_llm(
                 raw = raw.split("```")[1]
                 raw = raw.lstrip("json\n").rstrip("```").strip()
             result = json.loads(raw)
-            return result if isinstance(result, dict) else {}
+            if not isinstance(result, dict):
+                return {}
+            # Map device numbers (1-based) back to entity_ids
+            suggestions: Dict[str, str] = {}
+            for key, room_name in result.items():
+                idx = int(key) - 1 if isinstance(key, (int, str)) and str(key).isdigit() else -1
+                if 0 <= idx < len(chunk):
+                    suggestions[chunk[idx]["entity_id"]] = room_name
+            return suggestions
         except Exception as e:
             logger.warning("_call_suggest_rooms_llm attempt %d failed: %s", attempt + 1, e)
             if attempt < 2:
                 time.sleep(2 ** attempt)
     return []
+
+
+# Similarity threshold for embedding-based room matching (0-1, higher = stricter)
+_EMBEDDING_SIMILARITY_THRESHOLD = 0.25
+
+# Common room names used as candidates for embedding-based room suggestion
+_COMMON_ROOM_NAMES = [
+    "Kitchen", "Bedroom", "Living Room", "Bathroom", "Office", "Garage",
+    "Hallway", "Dining Room", "Basement", "Attic", "Laundry Room",
+    "Guest Room", "Kids Room", "Nursery", "Closet", "Pantry", "Mudroom",
+    "Family Room", "Sunroom", "Library", "Workshop", "Gym", "Loft",
+    "Foyer", "Balcony", "Patio", "Garden", "Storage", "Utility Room",
+]
+
+
+def _normalize_room_name(name: str) -> str:
+    """Normalize a room name for fuzzy comparison (lowercase, strip suffixes)."""
+    n = name.lower().strip()
+    for suffix in (" room", " area", " zone"):
+        if n.endswith(suffix):
+            n = n[: -len(suffix)]
+    return n
+
+
+def _embedding_belongs_in_room(
+    devices: List[Dict[str, Any]],
+    room_name: str,
+    room_description: str = "",
+) -> List[str]:
+    """
+    Use embedding cosine similarity to decide which devices belong in a room.
+    Devices whose HA area matches the room name are auto-qualified.
+    Returns a list of entity_ids that should be placed in the room.
+    No LLM tokens are consumed.
+    """
+    try:
+        cache = _get_device_cache()
+        model = _get_embedding_model()
+        all_devices = cache["devices"]
+        all_embeddings = cache["embeddings"]
+
+        # Build entity_id -> embedding index
+        emb_by_entity = {d["entity_id"]: i for i, d in enumerate(all_devices)}
+
+        # Embed the room query (room name + optional description)
+        room_query = room_name
+        if room_description:
+            room_query += " " + room_description
+        room_emb = model.encode([room_query], normalize_embeddings=True)[0].tolist()
+
+        room_norm = _normalize_room_name(room_name)
+        belonging: List[str] = []
+
+        for device in devices:
+            eid = device["entity_id"]
+            # Auto-qualify if HA area matches room name
+            device_area = device.get("area") or ""
+            if device_area and _normalize_room_name(device_area) == room_norm:
+                belonging.append(eid)
+                continue
+
+            # Otherwise use embedding similarity
+            idx = emb_by_entity.get(eid)
+            if idx is None:
+                continue
+            device_emb = all_embeddings[idx]
+            similarity = sum(a * b for a, b in zip(room_emb, device_emb))
+            if similarity >= _EMBEDDING_SIMILARITY_THRESHOLD:
+                belonging.append(eid)
+
+        logger.info("_embedding_belongs_in_room: %d devices, %d belong in '%s' (threshold=%.2f)",
+                     len(devices), len(belonging), room_name, _EMBEDDING_SIMILARITY_THRESHOLD)
+        return belonging
+    except Exception as e:
+        logger.warning("_embedding_belongs_in_room failed: %s", e)
+        return []
+
+
+def _embedding_suggest_room(device: Dict[str, Any], existing_room_names: List[str]) -> Optional[str]:
+    """
+    Use embedding similarity to suggest a room name for a device.
+    Compares the device text against common room names and existing room names.
+    Returns the best matching room name, or None if no good match.
+    No LLM tokens are consumed.
+    """
+    try:
+        model = _get_embedding_model()
+
+        # Build candidate list: common room names + existing room names
+        candidates = list(_COMMON_ROOM_NAMES)
+        for name in existing_room_names:
+            if name not in candidates:
+                candidates.append(name)
+
+        # Embed device text
+        device_text = f"{device.get('name', '')} {device.get('domain', '')} {device.get('area', '') or ''}"
+        device_emb = model.encode([device_text], normalize_embeddings=True)[0].tolist()
+
+        # Embed candidates and find best match
+        candidate_embs = model.encode(candidates, normalize_embeddings=True).tolist()
+        best_score = 0.0
+        best_name = None
+        for i, candidate_emb in enumerate(candidate_embs):
+            score = sum(a * b for a, b in zip(device_emb, candidate_emb))
+            if score > best_score:
+                best_score = score
+                best_name = candidates[i]
+
+        if best_score >= _EMBEDDING_SIMILARITY_THRESHOLD and best_name:
+            logger.debug("_embedding_suggest_room: %s -> '%s' (score=%.3f)", device_text.strip(), best_name, best_score)
+            return best_name
+        logger.debug("_embedding_suggest_room: %s -> no match (best=%.3f)", device_text.strip(), best_score)
+        return None
+    except Exception as e:
+        logger.warning("_embedding_suggest_room failed: %s", e)
+        return None
 
 
 def _ai_belongs_in_room_batch(
@@ -911,12 +1112,13 @@ def tool_inspect_and_assign_devices_to_room(room_name: str, room_description: st
         existing_entity_ids = {p.entity_id for p in existing_placements}
 
     # Get all discovered devices
-    all_devices = discover_devices()
+    all_devices = tool_discover_devices()
     unplaced = [d for d in all_devices if d["entity_id"] not in existing_entity_ids]
     logger.info("inspect_and_assign_devices_to_room: %d total devices, %d already placed in '%s', %d to evaluate",
                  len(all_devices), len(existing_entity_ids), room_name, len(unplaced))
 
-    belonging_entity_ids = _ai_belongs_in_room_batch(unplaced, room_name, room_description)
+    # Use embedding-based matching only (zero LLM tokens)
+    belonging_entity_ids = _embedding_belongs_in_room(unplaced, room_name, room_description)
     belonging_entity_ids_set = set(belonging_entity_ids)
 
     to_place: List[Dict[str, Any]] = []
@@ -986,7 +1188,7 @@ def _ai_suggest_room_for_device(device_name: str, entity_id: str, domain: str) -
             return None
 
         llm = ChatOpenAI(
-            model="deepseek-v4-flash",
+            model="glm-5.1",
             api_key=opencode_token,
             base_url="https://opencode.ai/zen/go/v1",
             temperature=0,
@@ -995,7 +1197,6 @@ def _ai_suggest_room_for_device(device_name: str, entity_id: str, domain: str) -
         prompt = (
             f"A Home Assistant device has the following properties:\n"
             f"  - Name: {device_name}\n"
-            f"  - Entity ID: {entity_id}\n"
             f"  - Domain: {domain}\n\n"
             f"Suggest a short, common room name (1-3 words) where this device would typically be found. "
             f"Examples: Kitchen, Bedroom, Living Room, Bathroom, Office, Garage, Hallway. "
@@ -1045,7 +1246,7 @@ def tool_generate_rooms_from_devices(default_width_m: float = 4.0, default_heigh
     """
     logger.info("generate_rooms_from_devices requested: default_width=%.2f height=%.2f", default_width_m, default_height_m)
 
-    all_devices = discover_devices()
+    all_devices = tool_discover_devices()
     if not all_devices:
         return {"error": "No devices found in Home Assistant."}
 
@@ -1057,14 +1258,19 @@ def tool_generate_rooms_from_devices(default_width_m: float = 4.0, default_heigh
             area = "__unassigned__"
         areas.setdefault(area, []).append(device)
 
-    # For unassigned devices, batch AI query to suggest room names
+    # For unassigned devices, use embedding-based room suggestion only (zero LLM tokens)
     unassigned = areas.pop("__unassigned__", [])
     if unassigned:
+        existing_room_names_list = [r["name"] for r in tool_list_rooms()]
         ai_suggested_areas: Dict[str, List[Dict[str, Any]]] = {}
-        suggestions = _ai_suggest_rooms_batch(unassigned)
+
         for device in unassigned:
-            area_key = suggestions.get(device["entity_id"]) or "Unassigned Room"
-            ai_suggested_areas.setdefault(area_key, []).append(device)
+            suggested = _embedding_suggest_room(device, existing_room_names_list)
+            if suggested:
+                ai_suggested_areas.setdefault(suggested, []).append(device)
+            else:
+                logger.info("generate_rooms_from_devices: skipping '%s' (no embedding room match)", device.get("name", ""))
+
         areas.update(ai_suggested_areas)
 
     # Get existing room names

@@ -26,9 +26,9 @@ from .mcp_client import get_mcp_tools
 
 logger = logging.getLogger(__name__)
 
-# OpenCode Go configuration (DeepSeek V4 Pro)
+# OpenCode Go configuration (GLM 5.1)
 OPENCODE_BASE_URL = "https://opencode.ai/zen/go/v1"
-OPENCODE_MODEL = "deepseek-v4-flash"
+OPENCODE_MODEL = "glm-5.1"
 
 
 # LangChain tools wrapping backend functions
@@ -180,7 +180,7 @@ TOOLS = [
 
 async def process_chat_with_langchain(user_message: str, history: list | None = None) -> dict:
     """
-    Process a chat message using LangChain agent with OpenCode DeepSeek V4 Flash.
+    Process a chat message using LangChain agent with OpenCode GLM 5.1.
     Accepts optional conversation history as a list of {"role": "user"/"assistant", "content": "..."} dicts.
     Returns reply and optional map_data.
 
@@ -195,7 +195,7 @@ async def process_chat_with_langchain(user_message: str, history: list | None = 
         return {"reply": "OpenCode API key not configured."}
 
     try:
-        # Initialize DeepSeek V4 Pro via OpenCode Go
+        # Initialize GLM 5.1 via OpenCode Go
         llm = ChatOpenAI(
             model=OPENCODE_MODEL,
             api_key=opencode_token,
@@ -230,6 +230,9 @@ async def process_chat_with_langchain(user_message: str, history: list | None = 
             "Be concise and user-friendly in responses. "
             "Interpret measurements as feet unless otherwise specified. "
             "When you need to work with devices, use the discover_devices tool first to get the current list. "
+            "IMPORTANT: When asked to auto-assign or auto-place multiple devices, use the "
+            "inspect_and_assign_devices_to_room or generate_rooms_from_devices tools. "
+            "Do NOT call place_device repeatedly for individual devices — use the batch tools instead. "
             + mcp_hint
         )
 
@@ -240,7 +243,7 @@ async def process_chat_with_langchain(user_message: str, history: list | None = 
             system_prompt=system_prompt,
         )
 
-        logger.info("LangChain agent (OpenCode DeepSeek V4 Pro) processing: %s", user_message)
+        logger.info("LangChain agent (OpenCode GLM 5.1) processing: %s", user_message)
 
         # Build the messages list: prior chat history + new user message
         messages = []
@@ -255,7 +258,12 @@ async def process_chat_with_langchain(user_message: str, history: list | None = 
         messages.append(HumanMessage(content=user_message))
 
         # Run agent (async because MCP tools are async)
-        result = await agent.ainvoke({"messages": messages})
+        # recursion_limit caps the number of agent+tool steps to prevent infinite loops
+        result = await agent.ainvoke(
+            {"messages": messages},
+            config={"recursion_limit": 30},
+        )
+        logger.info("Agent completed after %d messages", len(result.get("messages", [])))
 
         # Extract reply from the last AIMessage in the output messages
         reply = ""
@@ -290,9 +298,12 @@ async def process_chat_with_langchain(user_message: str, history: list | None = 
                 except json.JSONDecodeError:
                     logger.debug("render_room_map ToolMessage content was not JSON")
 
-        logger.info("LangChain agent (OpenCode DeepSeek V4 Pro) output: %s", reply)
+        logger.info("LangChain agent (OpenCode GLM 5.1) output: %s", reply)
         return {"reply": reply, "map_data": map_data}
 
     except Exception as e:
-        logger.error("Error processing chat with OpenCode LangChain: %s", e)
-        return {"reply": f"Error: {str(e)}"}
+        error_str = str(e)
+        logger.error("Error processing chat with OpenCode LangChain: %s", error_str)
+        if "recursion" in error_str.lower() or "limit" in error_str.lower():
+            return {"reply": "The agent took too many steps and was interrupted. For bulk device operations, use the batch auto-assign or generate-rooms buttons instead of asking the chat to place devices one by one."}
+        return {"reply": f"Error: {error_str}"}

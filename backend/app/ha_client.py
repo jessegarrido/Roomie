@@ -1,5 +1,6 @@
 import os
 import logging
+import time
 from typing import List, Dict, Any, Optional
 
 import httpx
@@ -24,6 +25,27 @@ MOCK_STATES = {
 }
 
 logger = logging.getLogger(__name__)
+
+# --- Caching layer to avoid hammering Home Assistant on every tool call ---
+# discover_devices() is called by tool_discover_devices() which populates a
+# module-level metadata cache in tools.py. _enrich_placement() reads from that
+# cache instead of making direct HA calls on every place/move/render.
+# get_device_states() remains available for explicit state-refresh needs.
+_CACHE_TTL_SECONDS = float(os.getenv("HA_CACHE_TTL_SECONDS", "30"))
+_device_cache: Optional[List[Dict[str, Any]]] = None
+_device_cache_ts: float = 0.0
+_state_cache: Optional[Dict[str, str]] = None
+_state_cache_ts: float = 0.0
+
+
+def invalidate_ha_cache() -> None:
+    """Clear the in-memory HA device and state caches so the next call fetches fresh data."""
+    global _device_cache, _device_cache_ts, _state_cache, _state_cache_ts
+    _device_cache = None
+    _device_cache_ts = 0.0
+    _state_cache = None
+    _state_cache_ts = 0.0
+    logger.info("HA device and state caches invalidated")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -183,7 +205,7 @@ async def _discover_from_ws(base_url: str, token: str, timeout_s: float) -> List
     return discovered
 
 
-def discover_devices() -> List[Dict[str, Any]]:
+def _discover_devices_uncached() -> List[Dict[str, Any]]:
     use_mock = _env_bool("HA_USE_MOCK", True)
     fallback_to_mock = _env_bool("HA_FALLBACK_TO_MOCK", True)
     timeout_s = float(os.getenv("HA_TIMEOUT_SECONDS", "8"))
@@ -200,7 +222,17 @@ def discover_devices() -> List[Dict[str, Any]]:
         return []
 
     try:
-        # Use WebSocket API to get area assignments (REST /api/states doesn't expose areas)
+        # Try MCP first (zero direct WebSocket/REST calls when available)
+        from .mcp_client import discover_devices_via_mcp
+        mcp_devices = asyncio.run(discover_devices_via_mcp())
+        if mcp_devices is not None:
+            logger.info("Device discovery via MCP: %d devices", len(mcp_devices))
+            if mcp_devices or not fallback_to_mock:
+                return mcp_devices
+            # MCP returned empty list — fall through to WebSocket
+            logger.warning("MCP returned no devices; falling back to WebSocket API.")
+
+        # Fallback: WebSocket API for area assignments (REST /api/states doesn't expose areas)
         devices = asyncio.run(_discover_from_ws(base_url=base_url, token=token, timeout_s=timeout_s))
         if devices:
             return devices
@@ -215,10 +247,22 @@ def discover_devices() -> List[Dict[str, Any]]:
         return []
 
 
-def get_device_states() -> Dict[str, str]:
+def discover_devices() -> List[Dict[str, Any]]:
+    """Return discovered devices, using a TTL cache to avoid repeated HA API calls."""
+    global _device_cache, _device_cache_ts
+    now = time.time()
+    if _device_cache is not None and (now - _device_cache_ts) < _CACHE_TTL_SECONDS:
+        return _device_cache
+    _device_cache = _discover_devices_uncached()
+    _device_cache_ts = now
+    return _device_cache
+
+
+def _get_device_states_uncached() -> Dict[str, str]:
     """Return a mapping of entity_id -> state string for all known devices.
 
-    When connected to Home Assistant, fetches live states from /api/states.
+    When connected to Home Assistant via MCP, fetches states through MCP tools.
+    Falls back to REST /api/states when MCP is unavailable.
     When using mock devices, returns the hardcoded MOCK_STATES dict.
     """
     use_mock = _env_bool("HA_USE_MOCK", True)
@@ -237,6 +281,34 @@ def get_device_states() -> Dict[str, str]:
         return {}
 
     try:
+        # Try MCP first (zero direct REST calls when available)
+        from .mcp_client import get_mcp_tools
+        import asyncio as _asyncio
+
+        async def _fetch_states_via_mcp() -> Dict[str, str] | None:
+            tools = await get_mcp_tools()
+            if not tools:
+                return None
+            tool_map = {t.name: t for t in tools}
+            if "ha_get_states" not in tool_map:
+                return None
+            states_result = await tool_map["ha_get_states"].ainvoke({})
+            states = _parse_states_result(states_result)
+            if states is None:
+                return None
+            result: Dict[str, str] = {}
+            for row in states:
+                entity_id = row.get("entity_id")
+                if entity_id and "." in entity_id:
+                    result[entity_id] = row.get("state", "")
+            return result
+
+        mcp_states = asyncio.run(_fetch_states_via_mcp())
+        if mcp_states is not None:
+            logger.info("State fetch via MCP: %d entities", len(mcp_states))
+            return mcp_states
+
+        # Fallback: REST API
         url = f"{base_url.rstrip('/')}/api/states"
         headers = {"Authorization": f"Bearer {token}"}
         with httpx.Client(timeout=timeout_s, headers=headers) as client:
@@ -255,3 +327,27 @@ def get_device_states() -> Dict[str, str]:
             logger.warning("Home Assistant state fetch failed (%s); falling back to mock states.", exc)
             return dict(MOCK_STATES)
         return {}
+
+
+def _parse_states_result(result: Any) -> Any:
+    """Parse a tool result that may be a JSON string, dict, or list."""
+    if isinstance(result, (dict, list)):
+        return result
+    if isinstance(result, str):
+        import json
+        try:
+            return json.loads(result)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def get_device_states() -> Dict[str, str]:
+    """Return device states, using a TTL cache to avoid repeated HA API calls."""
+    global _state_cache, _state_cache_ts
+    now = time.time()
+    if _state_cache is not None and (now - _state_cache_ts) < _CACHE_TTL_SECONDS:
+        return _state_cache
+    _state_cache = _get_device_states_uncached()
+    _state_cache_ts = now
+    return _state_cache

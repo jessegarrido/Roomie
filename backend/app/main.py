@@ -29,8 +29,11 @@ from .schemas import (
     RoomOut,
     UpdateFixtureRequest,
     UpdatePlacementTypeRequest,
+    AutoAssignRequest,
+    AutoGenerateRoomsRequest,
 )
 from .agent import process_chat_with_langchain
+from .ha_client import invalidate_ha_cache
 from .tools import (
     tool_assign_room_to_floor,
     tool_create_floor,
@@ -39,6 +42,10 @@ from .tools import (
     tool_delete_floor,
     tool_delete_room,
     tool_discover_devices,
+    tool_generate_rooms_from_devices,
+    tool_inspect_and_assign_devices_to_room,
+    tool_remove_all_devices_from_room,
+    tool_remove_all_fixtures_from_room,
     tool_insert_fixture_by_room_id,
     tool_list_floors,
     tool_list_rooms,
@@ -117,6 +124,8 @@ def list_tools() -> dict:
 
 @app.get("/devices", response_model=list[DeviceOut])
 def devices() -> list[DeviceOut]:
+    # Invalidate cache so the frontend always gets fresh data when explicitly requesting devices
+    invalidate_ha_cache()
     discovered = tool_discover_devices()
     return [DeviceOut(**device) for device in discovered]
 
@@ -132,6 +141,61 @@ async def chat(req: ChatRequest) -> ChatResponse:
     result = await process_chat_with_langchain(req.message, history=req.history)
     logger.info("Chat response generated")
     return ChatResponse(**result)
+
+
+@app.post("/rooms/{room_id}/auto-assign")
+def auto_assign_devices(room_id: int, req: AutoAssignRequest) -> dict:
+    """Directly call the batch auto-assign tool, bypassing the LangChain agent."""
+    rooms = tool_list_rooms()
+    room = next((r for r in rooms if r["id"] == room_id), None)
+    if not room:
+        raise HTTPException(status_code=404, detail=f"Room {room_id} not found")
+    logger.info("Auto-assign devices to room '%s' (id=%d)", room["name"], room_id)
+    result = tool_inspect_and_assign_devices_to_room(
+        room_name=room["name"],
+        room_description=req.room_description,
+        max_to_assign=req.max_to_assign,
+    )
+    logger.info("Auto-assign complete: %s", {k: v for k, v in result.items() if k != "devices"})
+    return result
+
+
+@app.post("/auto-generate-rooms")
+def auto_generate_rooms(req: AutoGenerateRoomsRequest) -> dict:
+    """Directly call the batch generate-rooms tool, bypassing the LangChain agent."""
+    logger.info("Auto-generate rooms requested")
+    result = tool_generate_rooms_from_devices(
+        default_width_m=req.default_width_m,
+        default_height_m=req.default_height_m,
+    )
+    logger.info("Auto-generate complete: %s", {k: v for k, v in result.items() if k not in ("placed_devices", "rejected_devices")})
+    return result
+
+
+@app.delete("/rooms/{room_id}/devices")
+def remove_all_devices_from_room(room_id: int) -> dict:
+    """Remove every device placement from a room. Fixtures are preserved."""
+    rooms = tool_list_rooms()
+    room = next((r for r in rooms if r["id"] == room_id), None)
+    if not room:
+        raise HTTPException(status_code=404, detail=f"Room {room_id} not found")
+    result = tool_remove_all_devices_from_room(room_name=room["name"])
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
+
+
+@app.delete("/rooms/{room_id}/fixtures")
+def remove_all_fixtures_from_room(room_id: int) -> dict:
+    """Remove every fixture from a room. Device placements are preserved."""
+    rooms = tool_list_rooms()
+    room = next((r for r in rooms if r["id"] == room_id), None)
+    if not room:
+        raise HTTPException(status_code=404, detail=f"Room {room_id} not found")
+    result = tool_remove_all_fixtures_from_room(room_name=room["name"])
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 @app.get("/floors", response_model=list[FloorOut])

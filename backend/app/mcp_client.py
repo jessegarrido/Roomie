@@ -142,3 +142,111 @@ def reset_mcp_cache() -> None:
     global _mcp_tools_cache, _mcp_client
     _mcp_tools_cache = None
     _mcp_client = None
+
+
+async def discover_devices_via_mcp() -> list[dict[str, Any]] | None:
+    """
+    Discover devices using MCP tools instead of direct WebSocket/REST calls.
+
+    Calls ha_get_states for entity data and ha_get_areas / ha_get_devices
+    for area mapping, then cross-references to produce the same device
+    list format as ha_client.discover_devices().
+
+    Returns None if MCP is unavailable or the call fails (caller should
+    fall back to ha_client's WebSocket/REST path).
+    """
+    tools = await get_mcp_tools()
+    if not tools:
+        return None
+
+    tool_map = {t.name: t for t in tools}
+
+    try:
+        # Fetch all entity states via MCP
+        if "ha_get_states" not in tool_map:
+            logger.warning("ha_get_states not available in MCP tools")
+            return None
+        states_result = await tool_map["ha_get_states"].ainvoke({})
+        states = _parse_json_result(states_result)
+        if not states:
+            logger.warning("ha_get_states returned no data")
+            return None
+
+        # Fetch areas via MCP (area_id -> name)
+        area_id_to_name: dict[str, str] = {}
+        if "ha_get_areas" in tool_map:
+            areas_result = await tool_map["ha_get_areas"].ainvoke({})
+            areas_data = _parse_json_result(areas_result)
+            if isinstance(areas_data, list):
+                for a in areas_data:
+                    if isinstance(a, dict) and "area_id" in a and "name" in a:
+                        area_id_to_name[a["area_id"]] = a["name"]
+
+        # Fetch devices via MCP (device_id -> area_id)
+        device_id_to_area: dict[str, str] = {}
+        if "ha_get_devices" in tool_map:
+            devices_result = await tool_map["ha_get_devices"].ainvoke({})
+            devices_data = _parse_json_result(devices_result)
+            if isinstance(devices_data, list):
+                for d in devices_data:
+                    if isinstance(d, dict) and "id" in d:
+                        area_id = d.get("area_id") or ""
+                        device_id_to_area[d["id"]] = area_id_to_name.get(area_id, "")
+
+        # Build discovered devices list from states
+        discovered: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        for row in states:
+            entity_id = row.get("entity_id")
+            if not entity_id or "." not in entity_id:
+                continue
+            domain = entity_id.split(".", 1)[0]
+            if domain in {"automation", "calendar"}:
+                continue
+            if entity_id in seen:
+                continue
+
+            attrs = row.get("attributes") or {}
+            # Try direct area from attributes, then device-derived area
+            direct_area = (
+                attrs.get("area_name")
+                or attrs.get("area")
+                or attrs.get("room")
+                or attrs.get("suggested_area")
+                or attrs.get("area_id")
+            )
+            area = direct_area or None
+
+            discovered.append(
+                {
+                    "entity_id": entity_id,
+                    "name": attrs.get("friendly_name") or entity_id,
+                    "domain": domain,
+                    "area": area,
+                    "state": row.get("state"),
+                }
+            )
+            seen.add(entity_id)
+
+        discovered.sort(key=lambda d: d["entity_id"])
+        logger.info("MCP device discovery: %d devices, %d areas, %d devices-with-areas",
+                    len(discovered), len(area_id_to_name), len(device_id_to_area))
+        return discovered
+
+    except Exception as exc:
+        logger.warning("MCP device discovery failed: %s", exc)
+        return None
+
+
+def _parse_json_result(result: Any) -> Any:
+    """Parse a tool result that may be a JSON string, dict, or list."""
+    if isinstance(result, (dict, list)):
+        return result
+    if isinstance(result, str):
+        import json
+        try:
+            return json.loads(result)
+        except json.JSONDecodeError:
+            return None
+    return None
