@@ -259,43 +259,61 @@ export function renderRoomSvgContent(opts: SvgRenderOpts): {
   for (const d of mapData.placements) {
     const x = offsetX + plotX + (d.x_m / mapData.room.width_m) * plotWidth;
     const y = offsetY + plotY + (d.y_m / mapData.room.height_m) * plotHeight;
-    const nearRightBorder = x - offsetX >= plotX + plotWidth * 0.9;
-    const labelX = nearRightBorder ? x - 10 : x + 10;
-    const labelAnchor = nearRightBorder ? "end" : "start";
-    const isLight = d.entity_id?.startsWith("light.");
+    const deviceType = d.device_type ?? "default";
+    const isLight = deviceType === "light";
     const isLightOn = isLight && d.state === "on";
-    const isFan = d.entity_id?.startsWith("fan.");
+    const isFan = deviceType === "fan";
     const isFanOn = isFan && d.state === "on";
+    const radiusPx = Math.max(4, (d.size_m ?? 0.1) / 2 / mapData.room.width_m * plotWidth);
+    const nearRightBorder = x - offsetX >= plotX + plotWidth * 0.9;
+    const labelGap = 4;
+    const labelX = nearRightBorder ? x - radiusPx - labelGap : x + radiusPx + labelGap;
+    const labelAnchor = nearRightBorder ? "end" : "start";
+    const stroke = "#000";
+    const sw = Math.max(1, radiusPx * 0.08);
 
-    if (isFan) {
-      // Ceiling fan icon: center hub + 4 blades
+    if (deviceType === "fan") {
       const fanGroupAttrs = isFanOn ? ' class="fan-spinning" style="transform-box: fill-box; transform-origin: center center;"' : "";
-      lines.push(
-        `<g${fanGroupAttrs}>`
-      );
-      lines.push(
-        `<circle cx="${x}" cy="${y}" r="2" fill="#000" />`
-      );
+      lines.push(`<g${fanGroupAttrs}>`);
+      lines.push(`<circle cx="${x}" cy="${y}" r="${Math.max(2, radiusPx * 0.3)}" fill="#000" />`);
+      const bladeWidth = radiusPx * 0.5;
+      const bladeHeight = Math.max(3, radiusPx * 0.7);
+      const bladeLen = radiusPx - bladeWidth / 2;
       for (const angle of [0, 90, 180, 270]) {
         const rad = (angle * Math.PI) / 180;
-        const bladeLen = 7;
-        const bladeWidth = 3.5;
         const bx = x + Math.cos(rad) * bladeLen;
         const by = y + Math.sin(rad) * bladeLen;
-        lines.push(
-          `<rect x="${bx - bladeWidth / 2}" y="${by - 1}" width="${bladeWidth}" height="5" rx="1.5" fill="#000" transform="rotate(${angle}, ${bx}, ${by})" />`
-        );
+        lines.push(`<rect x="${bx - bladeWidth / 2}" y="${by - bladeHeight / 2}" width="${bladeWidth}" height="${bladeHeight}" rx="1.5" fill="#000" transform="rotate(${angle}, ${bx}, ${by})" />`);
       }
       lines.push(`</g>`);
-    } else if (isLight) {
-      const lightFill = isLightOn ? "#FFD600" : "none";
-      lines.push(
-        `<circle cx="${x}" cy="${y}" r="7" fill="${lightFill}" stroke="#000" stroke-width="2" />`
-      );
+    } else if (deviceType === "light") {
+      const lightFill = isLightOn ? "#FFD600" : "#fff";
+      const lightOpacity = isLightOn ? 1 : 0.85;
+      lines.push(`<circle cx="${x}" cy="${y}" r="${radiusPx}" fill="${lightFill}" stroke="${stroke}" stroke-width="${Math.max(1, radiusPx * 0.12)}" opacity="${lightOpacity}" />`);
+      lines.push(`<circle cx="${x}" cy="${y}" r="${Math.max(1, radiusPx * 0.35)}" fill="none" stroke="${stroke}" stroke-width="${Math.max(0.5, radiusPx * 0.06)}" opacity="0.5" />`);
+    } else if (deviceType === "computer") {
+      lines.push(`<rect x="${x - radiusPx * 0.7}" y="${y - radiusPx * 0.5}" width="${radiusPx * 1.4}" height="${radiusPx}" rx="${Math.max(1, radiusPx * 0.1)}" fill="none" stroke="${stroke}" stroke-width="${sw}" />`);
+      lines.push(`<line x1="${x}" y1="${y + radiusPx * 0.5}" x2="${x}" y2="${y + radiusPx * 0.8}" stroke="${stroke}" stroke-width="${sw}" />`);
+      lines.push(`<line x1="${x - radiusPx * 0.4}" y1="${y + radiusPx * 0.8}" x2="${x + radiusPx * 0.4}" y2="${y + radiusPx * 0.8}" stroke="${stroke}" stroke-width="${sw}" stroke-linecap="round" />`);
+    } else if (deviceType === "switch") {
+      lines.push(`<rect x="${x - radiusPx * 0.55}" y="${y - radiusPx * 0.7}" width="${radiusPx * 1.1}" height="${radiusPx * 1.4}" rx="${Math.max(1, radiusPx * 0.1)}" fill="none" stroke="${stroke}" stroke-width="${sw}" />`);
+      lines.push(`<line x1="${x}" y1="${y - radiusPx * 0.3}" x2="${x}" y2="${y + radiusPx * 0.3}" stroke="${stroke}" stroke-width="${Math.max(1.5, radiusPx * 0.12)}" stroke-linecap="round" />`);
+      lines.push(`<circle cx="${x}" cy="${y - radiusPx * 0.3}" r="${Math.max(1, radiusPx * 0.15)}" fill="${stroke}" />`);
+    } else if (deviceType === "plug") {
+      lines.push(`<rect x="${x - radiusPx * 0.5}" y="${y - radiusPx * 0.6}" width="${radiusPx}" height="${radiusPx * 1.0}" rx="${Math.max(1, radiusPx * 0.1)}" fill="none" stroke="${stroke}" stroke-width="${sw}" />`);
+      lines.push(`<rect x="${x - radiusPx * 0.3}" y="${y + radiusPx * 0.4}" width="${radiusPx * 0.2}" height="${radiusPx * 0.3}" fill="${stroke}" />`);
+      lines.push(`<rect x="${x + radiusPx * 0.1}" y="${y + radiusPx * 0.4}" width="${radiusPx * 0.2}" height="${radiusPx * 0.3}" fill="${stroke}" />`);
+    } else if (deviceType === "sensor") {
+      lines.push(`<circle cx="${x}" cy="${y}" r="${radiusPx * 0.8}" fill="none" stroke="${stroke}" stroke-width="${sw}" />`);
+      lines.push(`<circle cx="${x}" cy="${y}" r="${radiusPx * 0.5}" fill="none" stroke="${stroke}" stroke-width="${Math.max(0.5, radiusPx * 0.05)}" opacity="0.6" />`);
+      lines.push(`<circle cx="${x}" cy="${y}" r="${radiusPx * 0.2}" fill="${stroke}" />`);
+    } else if (deviceType === "speaker") {
+      lines.push(`<rect x="${x - radiusPx * 0.5}" y="${y - radiusPx * 0.7}" width="${radiusPx}" height="${radiusPx * 1.4}" rx="${Math.max(1, radiusPx * 0.12)}" fill="none" stroke="${stroke}" stroke-width="${sw}" />`);
+      lines.push(`<circle cx="${x}" cy="${y - radiusPx * 0.35}" r="${Math.max(1, radiusPx * 0.22)}" fill="none" stroke="${stroke}" stroke-width="${Math.max(0.5, radiusPx * 0.06)}" />`);
+      lines.push(`<circle cx="${x}" cy="${y + radiusPx * 0.25}" r="${Math.max(1.5, radiusPx * 0.32)}" fill="none" stroke="${stroke}" stroke-width="${Math.max(0.5, radiusPx * 0.06)}" />`);
+      lines.push(`<circle cx="${x}" cy="${y + radiusPx * 0.25}" r="${Math.max(0.5, radiusPx * 0.12)}" fill="${stroke}" />`);
     } else {
-      lines.push(
-        `<circle cx="${x}" cy="${y}" r="7" fill="#ff7a59" />`
-      );
+      lines.push(`<circle cx="${x}" cy="${y}" r="${radiusPx}" fill="#ff7a59" />`);
     }
     lines.push(
       `<text x="${labelX}" y="${y + 4}" font-size="11" fill="#263238" text-anchor="${labelAnchor}">${escapeXml(d.label)}</text>`

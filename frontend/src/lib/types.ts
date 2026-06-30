@@ -3,13 +3,20 @@ export type ChatMessage = {
   content: string;
 };
 
+export type DeviceType = "light" | "fan" | "computer" | "switch" | "plug" | "sensor" | "speaker" | "default";
+
 export type DevicePlacement = {
   id: number;
   entity_id?: string;
   label: string;
   x_m: number;
   y_m: number;
+  size_m?: number;
   state?: string;
+  domain?: string;
+  area?: string | null;
+  device_type?: DeviceType;
+  device_type_override?: string | null;
 };
 
 export type Fixture = {

@@ -56,6 +56,7 @@ export default function Home() {
   const [selectedRoomId, setSelectedRoomId] = useState<number | null>(null);
   const [hiddenLabelIds, setHiddenLabelIds] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(false);
+  const [progressStatus, setProgressStatus] = useState<string | null>(null);
   const [renamingRoomId, setRenamingRoomId] = useState<number | null>(null);
   const [renamingFloorId, setRenamingFloorId] = useState<number | null>(null);
   const [renamingRoomName, setRenamingRoomName] = useState("");
@@ -625,6 +626,76 @@ export default function Home() {
     [selectedRoomId],
   );
 
+  const resizePlacement = useCallback(
+    async (placementId: number, size_m: number): Promise<boolean> => {
+      if (selectedRoomId === null) return false;
+      try {
+        const res = await fetch(`${API_BASE}/placements/${placementId}/size`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ size_m }),
+        });
+        if (!res.ok) return false;
+
+        const updated = (await res.json()) as { id: number; size_m: number };
+        setRoomMapsById((prev) => {
+          const currentMap = prev[selectedRoomId];
+          if (!currentMap) return prev;
+          return {
+            ...prev,
+            [selectedRoomId]: {
+              ...currentMap,
+              placements: currentMap.placements.map((placement) =>
+                placement.id === updated.id
+                  ? { ...placement, size_m: updated.size_m }
+                  : placement,
+              ),
+            },
+          };
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [selectedRoomId],
+  );
+
+  const updatePlacementType = useCallback(
+    async (placementId: number, deviceType: string | null): Promise<boolean> => {
+      if (selectedRoomId === null) return false;
+      try {
+        const res = await fetch(`${API_BASE}/placements/${placementId}/type`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ device_type: deviceType }),
+        });
+        if (!res.ok) return false;
+
+        const updated = (await res.json()) as { id: number; device_type?: string; device_type_override?: string | null };
+        setRoomMapsById((prev) => {
+          const currentMap = prev[selectedRoomId];
+          if (!currentMap) return prev;
+          return {
+            ...prev,
+            [selectedRoomId]: {
+              ...currentMap,
+              placements: currentMap.placements.map((placement) =>
+                placement.id === updated.id
+                  ? { ...placement, device_type: updated.device_type as any, device_type_override: updated.device_type_override ?? null }
+                  : placement,
+              ),
+            },
+          };
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [selectedRoomId],
+  );
+
   const createPlacementFromDrop = useCallback(
     async (device: { entity_id: string; name: string }, x_m: number, y_m: number): Promise<boolean> => {
       if (selectedRoomId === null) return false;
@@ -920,27 +991,186 @@ export default function Home() {
     const selectedRoom = selectedMapData?.room ?? rooms.find((room) => room.id === selectedRoomId);
     if (!selectedRoom) return;
 
+    // Gather discovered devices, fetching if not yet loaded
+    let deviceList = devices;
+    if (deviceList.length === 0) {
+      try {
+        const res = await fetch(`${API_BASE}/devices`);
+        if (res.ok) {
+          deviceList = (await res.json()) as DiscoveredDevice[];
+          setDevices(deviceList);
+        }
+      } catch {
+        // Ignore; will send whatever we have
+      }
+    }
+
+    // Exclude devices already placed in this room
+    const placedEntityIds = new Set(
+      (selectedMapData?.placements ?? []).map((p) => p.entity_id).filter(Boolean) as string[],
+    );
+    const unplaced = deviceList.filter((d) => !placedEntityIds.has(d.entity_id));
+
+    // Show the action as user's input in the chat
+    const shortQuery = `Auto-assign devices to room "${selectedRoom.name}" based on discovered device metadata.`;
+    setMessages((m) => [...m, { role: "user", content: shortQuery }]);
     setLoading(true);
+    setProgressStatus(`Evaluating devices for room "${selectedRoom.name}"…`);
+
     try {
-      const res = await fetch(`${API_BASE}/chat`, {
+      const res = await fetch(`${API_BASE}/rooms/${selectedRoom.id}/auto-assign`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: `Use the inspect_and_assign_devices_to_room tool to add devices to the room "${selectedRoom.name}".`,
-          history: messages.map((m) => ({ role: m.role, content: m.content })),
-        }),
+        body: JSON.stringify({ room_description: "", max_to_assign: 50 }),
       });
-      if (!res.ok) return;
-      const data = (await res.json()) as { reply: string; map_data?: RoomMapResponse | null };
-      if (data.map_data) {
-        setRoomMapsById((prev) => ({ ...prev, [selectedRoomId]: data.map_data as RoomMapResponse }));
+      if (!res.ok) {
+        setMessages((m) => [...m, { role: "assistant", content: "Failed to auto-assign devices." }]);
+        return;
       }
+      const data = (await res.json()) as {
+        room: string;
+        assigned_count: number;
+        rejected_count: number;
+        already_placed_count: number;
+        devices: { entity_id: string; label: string; x_m: number; y_m: number }[];
+        rejected: { entity_id: string; name: string }[];
+        errors: { entity_id: string; error: string }[];
+      };
+
+      // Build assistant reply summary — just device names
+      const deviceNames = data.devices.map((d) => d.label).join(", ");
+      const reply = `Auto-assigned **${data.assigned_count}** device(s) to room "${data.room}".` +
+        (data.rejected_count > 0 ? ` Rejected ${data.rejected_count} device(s).` : "") +
+        (data.errors.length > 0 ? ` Errors: ${data.errors.length}.` : "") +
+        (deviceNames ? `\n\n${deviceNames}` : "");
+
+      setMessages((m) => [...m, { role: "assistant", content: reply }]);
+
+      // Re-fetch the room map to show newly placed devices
+      if (data.assigned_count > 0) {
+        try {
+          const mapRes = await fetch(`${API_BASE}/rooms/${selectedRoom.id}/map`);
+          if (mapRes.ok) {
+            const mapData = (await mapRes.json()) as RoomMapResponse;
+            setRoomMapsById((prev) => ({ ...prev, [selectedRoom.id]: mapData }));
+          }
+        } catch {
+          // Map refresh is best-effort
+        }
+      }
+      await refreshDiscoveredDevices();
     } catch {
-      // Ignore errors; chat handles failure display.
+      setMessages((m) => [...m, { role: "assistant", content: "Failed to auto-assign devices. Is the backend running?" }]);
     } finally {
       setLoading(false);
+      setProgressStatus(null);
     }
-  }, [selectedRoomId, selectedMapData, rooms]);
+  }, [selectedRoomId, selectedMapData, rooms, devices, messages, refreshDiscoveredDevices]);
+
+  const generateRooms = useCallback(async (): Promise<void> => {
+    // Gather discovered devices, fetching if not yet loaded
+    let deviceList = devices;
+    if (deviceList.length === 0) {
+      try {
+        const res = await fetch(`${API_BASE}/devices`);
+        if (res.ok) {
+          deviceList = (await res.json()) as DiscoveredDevice[];
+          setDevices(deviceList);
+        }
+      } catch {
+        // Ignore; will send whatever we have
+      }
+    }
+
+    // Exclude devices already placed in any room
+    const placedEntityIds = new Set<string>();
+    for (const rm of Object.values(roomMapsById)) {
+      for (const p of rm.placements ?? []) {
+        if (p.entity_id) placedEntityIds.add(p.entity_id);
+      }
+    }
+    const unplaced = deviceList.filter((d) => !placedEntityIds.has(d.entity_id));
+
+    if (unplaced.length === 0) {
+      setMessages((m) => [...m, { role: "assistant", content: "All discovered devices are already placed in rooms. Nothing to auto-generate." }]);
+      return;
+    }
+
+    // Show the action as user's input in the chat
+    const shortQuery = `Auto-generate rooms and assign all unplaced discovered devices based on device metadata.`;
+    setMessages((m) => [...m, { role: "user", content: shortQuery }]);
+    setLoading(true);
+    setProgressStatus("Generating rooms and assigning devices…");
+
+    try {
+      const res = await fetch(`${API_BASE}/auto-generate-rooms`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ default_width_m: 4.0, default_height_m: 3.0 }),
+      });
+      if (!res.ok) {
+        setMessages((m) => [...m, { role: "assistant", content: "Failed to auto-generate rooms." }]);
+        return;
+      }
+      const data = (await res.json()) as {
+        rooms_created: number;
+        rooms_updated: number;
+        total_devices_placed: number;
+        total_devices_rejected: number;
+        room_details: { room: string; device_count: number; assigned: number; rejected: number }[];
+      };
+
+      // Build assistant reply summary — just room names with counts
+      const roomSummary = data.room_details.map((r) => `**${r.room}**: ${r.assigned} placed`).join(", ");
+      const reply = `Auto-generated rooms: **${data.rooms_created}** created, **${data.rooms_updated}** updated. Placed **${data.total_devices_placed}** device(s), rejected **${data.total_devices_rejected}**.` +
+        (roomSummary ? `\n\n${roomSummary}` : "");
+
+      setMessages((m) => [...m, { role: "assistant", content: reply }]);
+      await refreshRooms();
+      await refreshDiscoveredDevices();
+    } catch {
+      setMessages((m) => [...m, { role: "assistant", content: "Failed to auto-generate rooms. Is the backend running?" }]);
+    } finally {
+      setLoading(false);
+      setProgressStatus(null);
+    }
+  }, [devices, roomMapsById, messages, refreshRooms, refreshDiscoveredDevices]);
+
+  const removeAllDevices = useCallback(async (): Promise<void> => {
+    if (selectedRoomId === null) return;
+    const room = rooms.find((r) => r.id === selectedRoomId);
+    if (!room) return;
+    if (!window.confirm(`Remove all devices from "${room.name}"? Fixtures will be kept.`)) return;
+    try {
+      const res = await fetch(`${API_BASE}/rooms/${selectedRoomId}/devices`, { method: "DELETE" });
+      if (!res.ok) return;
+      setRoomMapsById((prev) => {
+        const currentMap = prev[selectedRoomId];
+        if (!currentMap) return prev;
+        return { ...prev, [selectedRoomId]: { ...currentMap, placements: [] } };
+      });
+    } catch {
+      /* ignore */
+    }
+  }, [selectedRoomId, rooms]);
+
+  const removeAllFixtures = useCallback(async (): Promise<void> => {
+    if (selectedRoomId === null) return;
+    const room = rooms.find((r) => r.id === selectedRoomId);
+    if (!room) return;
+    if (!window.confirm(`Remove all fixtures from "${room.name}"? Devices will be kept.`)) return;
+    try {
+      const res = await fetch(`${API_BASE}/rooms/${selectedRoomId}/fixtures`, { method: "DELETE" });
+      if (!res.ok) return;
+      setRoomMapsById((prev) => {
+        const currentMap = prev[selectedRoomId];
+        if (!currentMap) return prev;
+        return { ...prev, [selectedRoomId]: { ...currentMap, fixtures: [] } };
+      });
+    } catch {
+      /* ignore */
+    }
+  }, [selectedRoomId, rooms]);
 
   const resizeRoom = useCallback(
     async (width_m: number, height_m: number): Promise<boolean> => {
@@ -1011,12 +1241,40 @@ export default function Home() {
 
         <div className="messages" style={{ flex: `1 1 ${100 - devicesFlex}%` }}>
           <div className="messages-spacer" />
-          {messages.map((msg, idx) => (
-            <div key={idx} className={`msg ${msg.role === "user" ? "msg-user" : "msg-assistant"}`}>
-              {msg.content}
-            </div>
-          ))}
+          {messages.map((msg, idx) => {
+            // Detect messages containing a markdown device table
+            const tableMatch = msg.content.match(/^(.*?)(\| Name \| Entity ID \| Area \|\n\|[-\s|]+\|\n(?:\|[^\n]+\n)+)(.*)$/s);
+            if (tableMatch) {
+              const beforeTable = tableMatch[1].trim();
+              const tableBlock = tableMatch[2];
+              const afterTable = tableMatch[3].trim();
+              return (
+                <div key={idx} className={`msg ${msg.role === "user" ? "msg-user" : "msg-assistant"}`}>
+                  {beforeTable && <>{beforeTable}<br /><br /></>}
+                  <details className="device-table-collapse">
+                    <summary>Show device list ({tableBlock.split("\n").filter(l => l.startsWith("| ") && !l.includes("---")).length} devices)</summary>
+                    <pre className="device-table-pre">{tableBlock}</pre>
+                  </details>
+                  {afterTable && <><br /><br />{afterTable}</>}
+                </div>
+              );
+            }
+            return (
+              <div key={idx} className={`msg ${msg.role === "user" ? "msg-user" : "msg-assistant"}`}>
+                {msg.content}
+              </div>
+            );
+          })}
         </div>
+
+        {progressStatus && (
+          <div className="progress-bar-wrap">
+            <div className="progress-bar-track">
+              <div className="progress-bar-fill" />
+            </div>
+            <span className="progress-bar-label">{progressStatus}</span>
+          </div>
+        )}
 
         <form className="chat-form" onSubmit={onSubmit}>
           <input
@@ -1270,6 +1528,8 @@ export default function Home() {
                 });
               }}
               onMovePlacement={movePlacement}
+              onResizePlacement={resizePlacement}
+              onUpdatePlacementType={updatePlacementType}
               onDeletePlacement={deletePlacement}
               onMoveFixture={moveFixture}
               onDeleteFixture={deleteFixture}
@@ -1280,6 +1540,8 @@ export default function Home() {
               onSetUnit={setUnit}
               onInsertFixture={insertFixture}
               onAssignDevices={assignDevices}
+              onRemoveAllDevices={removeAllDevices}
+              onRemoveAllFixtures={removeAllFixtures}
             />
             <div className="map-control-group" style={{ marginTop: "16px", marginBottom: "8px" }}>
               <label htmlFor="room-select" className="map-label">Room</label>
@@ -1469,6 +1731,27 @@ export default function Home() {
                 style={{ marginLeft: selectedFloorId !== null ? "4px" : undefined }}
               >
                 +
+              </button>
+              <button
+                type="button"
+                onClick={() => void generateRooms()}
+                disabled={loading}
+                style={{
+                  border: 0,
+                  borderRadius: 8,
+                  background: "#1f6f8b",
+                  color: "#fff",
+                  padding: "3px 10px",
+                  cursor: loading ? "not-allowed" : "pointer",
+                  font: "inherit",
+                  fontSize: "0.82rem",
+                  marginLeft: "8px",
+                  opacity: loading ? 0.6 : 1,
+                }}
+                aria-label="Auto-generate rooms from devices"
+                title="Auto-generate rooms from discovered devices"
+              >
+                Generate Rooms
               </button>
             </div>
           ) : null}

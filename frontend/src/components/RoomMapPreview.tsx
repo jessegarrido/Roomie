@@ -9,7 +9,9 @@ type Props = {
   hiddenLabelIds: Set<number>;
   onToggleLabelVisibility: (id: number) => void;
   onMovePlacement?: (placementId: number, x_m: number, y_m: number) => Promise<boolean>;
+  onResizePlacement?: (placementId: number, size_m: number) => Promise<boolean>;
   onDeletePlacement?: (placementId: number) => Promise<boolean>;
+  onUpdatePlacementType?: (placementId: number, deviceType: string | null) => Promise<boolean>;
   onMoveFixture?: (elementId: number, x_m: number, y_m: number) => Promise<boolean>;
   onDeleteFixture?: (elementId: number) => Promise<boolean>;
   onResizeFixture?: (
@@ -34,6 +36,8 @@ type Props = {
   onSetUnit?: (unit: "m" | "ft") => void;
   onInsertFixture?: () => void;
   onAssignDevices?: () => void;
+  onRemoveAllDevices?: () => void;
+  onRemoveAllFixtures?: () => void;
 };
 
 export default function RoomMapPreview({
@@ -42,7 +46,9 @@ export default function RoomMapPreview({
   hiddenLabelIds,
   onToggleLabelVisibility,
   onMovePlacement,
+  onResizePlacement,
   onDeletePlacement,
+  onUpdatePlacementType,
   onMoveFixture,
   onDeleteFixture,
   onResizeFixture,
@@ -52,11 +58,9 @@ export default function RoomMapPreview({
   onSetUnit,
   onInsertFixture,
   onAssignDevices,
+  onRemoveAllDevices,
+  onRemoveAllFixtures,
 }: Props) {
-  if (!mapData) {
-    return <p>No room map yet. Ask the chat to render one.</p>;
-  }
-
   const svgRef = useRef<SVGSVGElement | null>(null);
   const elementDragMovedRef = useRef(false);
   const pendingPlacementPressRef = useRef<{
@@ -85,12 +89,21 @@ export default function RoomMapPreview({
     anchorScreenX: number;
     anchorScreenY: number;
   } | null>(null);
+  const pendingResizePlacementPressRef = useRef<{
+    placementId: number;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    startSizeM: number;
+    centerX: number;
+    centerY: number;
+  } | null>(null);
   const FEET_PER_METER = 3.28084;
   const unitLabel = unit === "ft" ? "ft" : "m";
   const convert = (valueMeters: number) => (unit === "ft" ? valueMeters * FEET_PER_METER : valueMeters);
 
   const plotWidth = 360;
-  const plotHeight = Math.max(240, (mapData.room.height_m / mapData.room.width_m) * plotWidth);
+  const plotHeight = Math.max(240, ((mapData?.room.height_m ?? 1) / (mapData?.room.width_m ?? 1)) * plotWidth);
   const ruler = { left: 28, top: 50, right: 24, bottom: 24 };
   const svgWidth = plotWidth + ruler.left + ruler.right;
   const svgHeight = plotHeight + ruler.top + ruler.bottom;
@@ -100,30 +113,41 @@ export default function RoomMapPreview({
   const yAxisX = plotX - 8;
   const tickFractions = [0, 0.25, 0.5, 0.75, 1];
 
-  const [placements, setPlacements] = useState(mapData.placements);
-  const [fixtures, setFixtures] = useState(mapData.fixtures ?? []);
+  const [placements, setPlacements] = useState(mapData?.placements ?? []);
+  const [fixtures, setFixtures] = useState(mapData?.fixtures ?? []);
   const [dragPlacementId, setDragPlacementId] = useState<number | null>(null);
   const [dragElementId, setDragElementId] = useState<number | null>(null);
   const [resizeElementId, setResizeElementId] = useState<number | null>(null);
   const [selectedElementId, setSelectedElementId] = useState<number | null>(null);
+  const [selectedPlacementId, setSelectedPlacementId] = useState<number | null>(null);
+  const [resizePlacementId, setResizePlacementId] = useState<number | null>(null);
   const [pendingSavePlacementId, setPendingSavePlacementId] = useState<number | null>(null);
   const [pendingSaveElementId, setPendingSaveElementId] = useState<number | null>(null);
+  const [zoom, setZoom] = useState(1);
   const fixtureKinds = ["wall", "door", "window", "stairs", "void", "desk", "sofa", "entry", "sink", "fixture"] as const;
 
   useEffect(() => {
-    setPlacements(mapData.placements);
+    if (!mapData) return;
+    setPlacements(mapData!.placements);
   }, [mapData]);
 
   useEffect(() => {
-    setFixtures(mapData.fixtures ?? []);
-  }, [mapData.fixtures]);
+    setFixtures(mapData?.fixtures ?? []);
+  }, [mapData?.fixtures]);
 
   useEffect(() => {
     setSelectedElementId((prev) => {
       if (prev === null) return null;
-      return (mapData.fixtures ?? []).some((element) => element.id === prev) ? prev : null;
+      return (mapData?.fixtures ?? []).some((element) => element.id === prev) ? prev : null;
     });
-  }, [mapData.fixtures]);
+  }, [mapData?.fixtures]);
+
+  useEffect(() => {
+    setSelectedPlacementId((prev) => {
+      if (prev === null) return null;
+      return (mapData?.placements ?? []).some((p) => p.id === prev) ? prev : null;
+    });
+  }, [mapData?.placements]);
 
   const placementsById = useMemo(() => {
     const byId = new Map<number, (typeof placements)[number]>();
@@ -150,8 +174,8 @@ export default function RoomMapPreview({
     const inBounds = svgX >= dryOuterX && svgX <= dryOuterX + dryOuterW && svgY >= dryOuterY && svgY <= dryOuterY + dryOuterH;
     const clampedX = clamp(svgX, dryOuterX, dryOuterX + dryOuterW);
     const clampedY = clamp(svgY, dryOuterY, dryOuterY + dryOuterH);
-    const x_m = ((clampedX - plotX) / plotWidth) * mapData.room.width_m;
-    const y_m = ((clampedY - plotY) / plotHeight) * mapData.room.height_m;
+    const x_m = ((clampedX - plotX) / plotWidth) * mapData!.room.width_m;
+    const y_m = ((clampedY - plotY) / plotHeight) * mapData!.room.height_m;
     return {
       inBounds,
       x_m: Number(x_m.toFixed(3)),
@@ -202,7 +226,21 @@ export default function RoomMapPreview({
       }
     }
 
-    if (dragPlacementId === null && dragElementId === null && resizeElementId === null) return;
+    if (resizePlacementId === null && pendingResizePlacementPressRef.current?.pointerId === pointerId) {
+      const pending = pendingResizePlacementPressRef.current;
+      const dx = clientX - pending.startX;
+      const dy = clientY - pending.startY;
+      const dragStartThresholdPx = 6;
+      if (Math.hypot(dx, dy) >= dragStartThresholdPx) {
+        setResizePlacementId(pending.placementId);
+        const svg = svgRef.current;
+        if (svg) {
+          svg.setPointerCapture(pointerId);
+        }
+      }
+    }
+
+    if (dragPlacementId === null && dragElementId === null && resizeElementId === null && resizePlacementId === null) return;
     const nextPosition = pointerToRoomPosition(clientX, clientY);
     if (!nextPosition) return;
 
@@ -239,8 +277,8 @@ export default function RoomMapPreview({
       // thickness axis is perpendicular (rotation_degrees + 90)
       const localDx = dx * cosA + dy * sinA;   // along length axis in pixels
       const localDy = -dx * sinA + dy * cosA;   // along thickness axis in pixels
-      const scaleLengthPx = Math.max(1, plotWidth / mapData.room.width_m);
-      const scaleThicknessPx = Math.max(1, plotHeight / mapData.room.height_m);
+      const scaleLengthPx = Math.max(1, plotWidth / mapData!.room.width_m);
+      const scaleThicknessPx = Math.max(1, plotHeight / mapData!.room.height_m);
       // Corner resize: both dimensions change simultaneously
       const deltaLengthM = localDx / scaleLengthPx;
       const deltaThicknessM = localDy / scaleThicknessPx;
@@ -259,8 +297,8 @@ export default function RoomMapPreview({
       const newCenterScreenX = pending.anchorScreenX + centerOffsetScreenX;
       const newCenterScreenY = pending.anchorScreenY + centerOffsetScreenY;
       // Convert screen center position back to room meters
-      const nextX_m = Number(((newCenterScreenX - plotX) / plotWidth * mapData.room.width_m).toFixed(3));
-      const nextY_m = Number(((newCenterScreenY - plotY) / plotHeight * mapData.room.height_m).toFixed(3));
+      const nextX_m = Number(((newCenterScreenX - plotX) / plotWidth * mapData!.room.width_m).toFixed(3));
+      const nextY_m = Number(((newCenterScreenY - plotY) / plotHeight * mapData!.room.height_m).toFixed(3));
       setFixtures((prev) =>
         prev.map((element) =>
           element.id === resizeElementId
@@ -276,12 +314,35 @@ export default function RoomMapPreview({
         ),
       );
     }
+
+    if (resizePlacementId !== null && pendingResizePlacementPressRef.current?.pointerId === pointerId) {
+      const pending = pendingResizePlacementPressRef.current;
+      const svg = svgRef.current;
+      if (!svg) return;
+      const rect = svg.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      // Convert current pointer to SVG coords
+      const svgX = ((clientX - rect.left) / rect.width) * svgWidth;
+      const svgY = ((clientY - rect.top) / rect.height) * svgHeight;
+      // Distance from device center in SVG pixels
+      const distPx = Math.hypot(svgX - pending.centerX, svgY - pending.centerY);
+      // Convert pixels to meters (use width scale)
+      const scalePx = Math.max(1, plotWidth / mapData!.room.width_m);
+      // distPx is the radius in pixels; size_m is diameter, so multiply by 2
+      const nextSize = Math.max(0.05, Number((2 * distPx / scalePx).toFixed(3)));
+      setPlacements((prev) =>
+        prev.map((p) =>
+          p.id === resizePlacementId ? { ...p, size_m: nextSize } : p,
+        ),
+      );
+    }
   };
 
   const handleDragEnd = async (pointerId: number, clientX: number, clientY: number) => {
     const placementId = dragPlacementId;
     const elementId = dragElementId;
     const resizingId = resizeElementId;
+    const resizingPlacementId = resizePlacementId;
     const svg = svgRef.current;
     if (svg && svg.hasPointerCapture(pointerId)) {
       svg.releasePointerCapture(pointerId);
@@ -289,12 +350,15 @@ export default function RoomMapPreview({
     setDragPlacementId(null);
     setDragElementId(null);
     setResizeElementId(null);
+    setResizePlacementId(null);
     pendingPlacementPressRef.current = null;
     pendingElementPressRef.current = null;
     const resizePending = pendingResizePressRef.current;
     pendingResizePressRef.current = null;
+    const resizePlacementPending = pendingResizePlacementPressRef.current;
+    pendingResizePlacementPressRef.current = null;
 
-    if (placementId === null && elementId === null && resizingId === null) return;
+    if (placementId === null && elementId === null && resizingId === null && resizingPlacementId === null) return;
     const releasedPosition = pointerToRoomPosition(clientX, clientY);
     if (!releasedPosition) return;
 
@@ -302,7 +366,7 @@ export default function RoomMapPreview({
       if (!releasedPosition.inBounds && onDeletePlacement) {
         const ok = await onDeletePlacement(placementId);
         if (!ok) {
-          setPlacements(mapData.placements);
+          setPlacements(mapData!.placements);
         }
         return;
       }
@@ -315,7 +379,7 @@ export default function RoomMapPreview({
       const ok = await onMovePlacement(placementId, moved.x_m, moved.y_m);
       setPendingSavePlacementId((current) => (current === placementId ? null : current));
       if (!ok) {
-        setPlacements(mapData.placements);
+        setPlacements(mapData!.placements);
       }
       return;
     }
@@ -327,7 +391,7 @@ export default function RoomMapPreview({
       if (!releasedPosition.inBounds && onDeleteFixture) {
         const ok = await onDeleteFixture(elementId);
         if (!ok) {
-          setFixtures(mapData.fixtures ?? []);
+          setFixtures(mapData!.fixtures ?? []);
         }
         return;
       }
@@ -339,7 +403,7 @@ export default function RoomMapPreview({
       const ok = await onMoveFixture(elementId, movedElement.x_m, movedElement.y_m);
       setPendingSaveElementId((current) => (current === elementId ? null : current));
       if (!ok) {
-        setFixtures(mapData.fixtures ?? []);
+        setFixtures(mapData!.fixtures ?? []);
       }
       return;
     }
@@ -357,7 +421,19 @@ export default function RoomMapPreview({
       });
       setPendingSaveElementId((current) => (current === resizingId ? null : current));
       if (!ok) {
-        setFixtures(mapData.fixtures ?? []);
+        setFixtures(mapData!.fixtures ?? []);
+      }
+      return;
+    }
+
+    if (resizingPlacementId !== null && resizePlacementPending?.placementId === resizingPlacementId) {
+      const movedPlacement = placements.find((p) => p.id === resizingPlacementId);
+      if (!movedPlacement || !onResizePlacement) return;
+      setPendingSavePlacementId(resizingPlacementId);
+      const ok = await onResizePlacement(resizingPlacementId, movedPlacement.size_m ?? 0.1);
+      setPendingSavePlacementId((current) => (current === resizingPlacementId ? null : current));
+      if (!ok) {
+        setPlacements(mapData!.placements);
       }
     }
   };
@@ -374,7 +450,7 @@ export default function RoomMapPreview({
     }
     const blob = new Blob([source], { type: "image/svg+xml;charset=utf-8" });
     const blobUrl = URL.createObjectURL(blob);
-    const safeRoomName = mapData.room.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+    const safeRoomName = mapData!.room.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
     const downloadLink = document.createElement("a");
     downloadLink.href = blobUrl;
     downloadLink.download = `${safeRoomName || "room"}-map.svg`;
@@ -414,7 +490,7 @@ export default function RoomMapPreview({
     const ok = await onUpdateFixture(elementId, patch);
     setPendingSaveElementId((current) => (current === elementId ? null : current));
     if (!ok) {
-      setFixtures(mapData.fixtures ?? []);
+      setFixtures(mapData!.fixtures ?? []);
     }
   };
 
@@ -453,6 +529,97 @@ export default function RoomMapPreview({
     ? fixtures.find((el) => el.id === selectedElementId) ?? null
     : null;
 
+  const selectedPlacementData = selectedPlacementId !== null
+    ? placements.find((p) => p.id === selectedPlacementId) ?? null
+    : null;
+
+  // ─── Keyboard nudge support ──────────────────────────────────
+  // Refs keep the latest state so the keydown listener stays stable.
+  const keyboardStateRef = useRef({
+    selectedElementId,
+    selectedPlacementId,
+    fixtures,
+    placements,
+  });
+  keyboardStateRef.current = { selectedElementId, selectedPlacementId, fixtures, placements };
+
+  const saveFixtureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savePlacementTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const ARROW_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
+    const STEP_M = 0.1;       // ~10 cm per press
+    const LARGE_STEP_M = 0.5;  // shift+arrow for bigger jumps
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't intercept when typing in form fields
+      const target = e.target as HTMLElement;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable) return;
+
+      // Escape deselects
+      if (e.key === "Escape") {
+        if (keyboardStateRef.current.selectedElementId !== null) setSelectedElementId(null);
+        if (keyboardStateRef.current.selectedPlacementId !== null) setSelectedPlacementId(null);
+        return;
+      }
+
+      if (!ARROW_KEYS.has(e.key)) return;
+
+      const { selectedElementId: selFixture, selectedPlacementId: selPlacement, fixtures: currFixtures, placements: currPlacements } = keyboardStateRef.current;
+      if (selFixture === null && selPlacement === null) return;
+      if (!mapData) return;
+
+      e.preventDefault();
+
+      const step = e.shiftKey ? LARGE_STEP_M : STEP_M;
+      const deltaX = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
+      const deltaY = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
+
+      if (selFixture !== null) {
+        const fixture = currFixtures.find((f) => f.id === selFixture);
+        if (!fixture) return;
+        const newX = Math.max(0, Math.min(mapData!.room.width_m, fixture.x_m + deltaX));
+        const newY = Math.max(0, Math.min(mapData!.room.height_m, fixture.y_m + deltaY));
+        setFixtures((prev) =>
+          prev.map((f) => (f.id === selFixture ? { ...f, x_m: newX, y_m: newY } : f)),
+        );
+        if (saveFixtureTimeoutRef.current) clearTimeout(saveFixtureTimeoutRef.current);
+        saveFixtureTimeoutRef.current = setTimeout(async () => {
+          if (!onMoveFixture) return;
+          setPendingSaveElementId(selFixture);
+          const ok = await onMoveFixture(selFixture, newX, newY);
+          setPendingSaveElementId((current) => (current === selFixture ? null : current));
+          if (!ok) setFixtures(mapData!.fixtures ?? []);
+        }, 400);
+      }
+
+      if (selPlacement !== null && mapData) {
+        const placement = currPlacements.find((p) => p.id === selPlacement);
+        if (!placement) return;
+        const newX = Math.max(0, Math.min(mapData!.room.width_m, placement.x_m + deltaX));
+        const newY = Math.max(0, Math.min(mapData!.room.height_m, placement.y_m + deltaY));
+        setPlacements((prev) =>
+          prev.map((p) => (p.id === selPlacement ? { ...p, x_m: newX, y_m: newY } : p)),
+        );
+        if (savePlacementTimeoutRef.current) clearTimeout(savePlacementTimeoutRef.current);
+        savePlacementTimeoutRef.current = setTimeout(async () => {
+          if (!onMovePlacement) return;
+          setPendingSavePlacementId(selPlacement);
+          const ok = await onMovePlacement(selPlacement, newX, newY);
+          setPendingSavePlacementId((current) => (current === selPlacement ? null : current));
+          if (!ok) setPlacements(mapData!.placements);
+        }, 400);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [mapData, onMoveFixture, onMovePlacement]);
+
+  if (!mapData) {
+    return <p>No room map yet. Ask the chat to render one.</p>;
+  }
+
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
@@ -472,7 +639,7 @@ export default function RoomMapPreview({
           viewBox={`0 0 ${svgWidth} ${svgHeight}`}
           role="img"
           aria-label="Room map preview with draggable placements"
-          style={{ touchAction: "none" }}
+          style={{ touchAction: "none", transform: `scale(${zoom})`, transformOrigin: "top left" }}
           onDragOver={(e) => {
             if (onDropDevice) {
               e.preventDefault();
@@ -487,6 +654,7 @@ export default function RoomMapPreview({
             const target = e.target as SVGElement;
             if (target.tagName.toLowerCase() === "svg") {
               setSelectedElementId(null);
+              setSelectedPlacementId(null);
             }
           }}
           onPointerMove={(e) => handleDragMove(e.pointerId, e.clientX, e.clientY)}
@@ -502,7 +670,10 @@ export default function RoomMapPreview({
           stroke="#1b2a2f"
           strokeWidth="2"
           rx="12"
-          onPointerDown={() => setSelectedElementId(null)}
+          onPointerDown={() => {
+            setSelectedElementId(null);
+            setSelectedPlacementId(null);
+          }}
         />
         {/* Drywall border – thin double line outside the room dimensions */}
         <rect
@@ -604,6 +775,7 @@ export default function RoomMapPreview({
                   e.preventDefault();
                   e.stopPropagation();
                   setSelectedElementId(element.id);
+                  setSelectedPlacementId(null);
                   elementDragMovedRef.current = false;
                   pendingElementPressRef.current = {
                     elementId: element.id,
@@ -881,19 +1053,27 @@ export default function RoomMapPreview({
         {placements.map((d) => {
           const x = plotX + (d.x_m / mapData.room.width_m) * plotWidth;
           const y = plotY + (d.y_m / mapData.room.height_m) * plotHeight;
+          const radiusPx = Math.max(4, ((d.size_m ?? 0.1) / 2 / mapData.room.width_m) * plotWidth);
           const nearRightBorder = x >= plotX + plotWidth * 0.9;
-          const labelX = nearRightBorder ? x - 10 : x + 10;
+          const labelGap = 4;
+          const labelX = nearRightBorder ? x - radiusPx - labelGap : x + radiusPx + labelGap;
           const labelAnchor = nearRightBorder ? "end" : "start";
           const isDragging = dragPlacementId === d.id;
           const isSaving = pendingSavePlacementId === d.id;
-          const isLight = d.entity_id?.startsWith("light.");
+          const deviceType = d.device_type ?? "default";
+          const isLight = deviceType === "light";
           const isLightOn = isLight && d.state === "on";
-          const isFan = d.entity_id?.startsWith("fan.");
+          const isFan = deviceType === "fan";
           const isFanOn = isFan && d.state === "on";
+          const isSelected = selectedPlacementId === d.id;
+          const iconStroke = isDragging ? "#f26b47" : "#000";
           return (
-            <g key={d.id} style={{ cursor: "grab" }}
+            <React.Fragment key={d.id}>
+            <g style={{ cursor: "grab" }}
               onPointerDown={(e) => {
                 e.preventDefault();
+                setSelectedPlacementId(d.id);
+                setSelectedElementId(null);
                 pendingPlacementPressRef.current = {
                   placementId: d.id,
                   pointerId: e.pointerId,
@@ -908,41 +1088,95 @@ export default function RoomMapPreview({
                 }
               }}
             >
-              {isFan ? (
+              {/* Invisible hit area for dragging (always present) */}
+              <circle cx={x} cy={y} r={radiusPx} fill="transparent" stroke={isSaving ? "#14532d" : "none"} strokeWidth={isSaving ? 2 : 0} />
+
+              {deviceType === "fan" && (
                 <g className={isFanOn ? "fan-spinning" : undefined}>
-                  <circle cx={x} cy={y} r="2" fill="#000" />
+                  <circle cx={x} cy={y} r={Math.max(2, radiusPx * 0.3)} fill={iconStroke} />
                   {[0, 90, 180, 270].map((angle) => {
                     const rad = (angle * Math.PI) / 180;
-                    const bladeLen = 7;
-                    const bladeWidth = 3.5;
+                    const bladeWidth = radiusPx * 0.5;
+                    const bladeHeight = Math.max(3, radiusPx * 0.7);
+                    const bladeLen = radiusPx - bladeWidth / 2;
                     const bx = x + Math.cos(rad) * bladeLen;
                     const by = y + Math.sin(rad) * bladeLen;
                     return (
                       <rect
                         key={angle}
                         x={bx - bladeWidth / 2}
-                        y={by - 1}
+                        y={by - bladeHeight / 2}
                         width={bladeWidth}
-                        height={5}
+                        height={bladeHeight}
                         rx={1.5}
-                        fill={isDragging ? "#f26b47" : "#000"}
+                        fill={iconStroke}
                         transform={`rotate(${angle}, ${bx}, ${by})`}
                       />
                     );
                   })}
-                  {/* Invisible hit area for dragging */}
-                  <circle cx={x} cy={y} r="9" fill="transparent" stroke={isSaving ? "#14532d" : "none"} strokeWidth={isSaving ? 2 : 0} />
                 </g>
-              ) : (
-                <circle
-                  cx={x}
-                  cy={y}
-                  r="7"
-                  fill={isLight ? (isLightOn ? "#FFD600" : "none") : isDragging ? "#f26b47" : "#ff7a59"}
-                  stroke={isLight ? "#000" : isSaving ? "#14532d" : "none"}
-                  strokeWidth={isLight ? "2" : isSaving ? "2" : "0"}
-                />
               )}
+
+              {deviceType === "light" && (
+                <g>
+                  <circle cx={x} cy={y} r={radiusPx} fill={isLightOn ? "#FFD600" : "#fff"} stroke={iconStroke} strokeWidth={Math.max(1, radiusPx * 0.12)} opacity={isLightOn ? 1 : 0.85} />
+                  {/* Light bulb filament hint */}
+                  <circle cx={x} cy={y} r={Math.max(1, radiusPx * 0.35)} fill="none" stroke={iconStroke} strokeWidth={Math.max(0.5, radiusPx * 0.06)} opacity={0.5} />
+                </g>
+              )}
+
+              {deviceType === "computer" && (
+                <g>
+                  <rect x={x - radiusPx * 0.7} y={y - radiusPx * 0.5} width={radiusPx * 1.4} height={radiusPx} rx={Math.max(1, radiusPx * 0.1)} fill="none" stroke={iconStroke} strokeWidth={Math.max(1, radiusPx * 0.08)} />
+                  <line x1={x} y1={y + radiusPx * 0.5} x2={x} y2={y + radiusPx * 0.8} stroke={iconStroke} strokeWidth={Math.max(1, radiusPx * 0.08)} />
+                  <line x1={x - radiusPx * 0.4} y1={y + radiusPx * 0.8} x2={x + radiusPx * 0.4} y2={y + radiusPx * 0.8} stroke={iconStroke} strokeWidth={Math.max(1, radiusPx * 0.08)} strokeLinecap="round" />
+                </g>
+              )}
+
+              {deviceType === "switch" && (
+                <g>
+                  <rect x={x - radiusPx * 0.55} y={y - radiusPx * 0.7} width={radiusPx * 1.1} height={radiusPx * 1.4} rx={Math.max(1, radiusPx * 0.1)} fill="none" stroke={iconStroke} strokeWidth={Math.max(1, radiusPx * 0.08)} />
+                  {/* Toggle lever */}
+                  <line x1={x} y1={y - radiusPx * 0.3} x2={x} y2={y + radiusPx * 0.3} stroke={iconStroke} strokeWidth={Math.max(1.5, radiusPx * 0.12)} strokeLinecap="round" />
+                  <circle cx={x} cy={y - radiusPx * 0.3} r={Math.max(1, radiusPx * 0.15)} fill={iconStroke} />
+                </g>
+              )}
+
+              {deviceType === "plug" && (
+                <g>
+                  {/* Plug body */}
+                  <rect x={x - radiusPx * 0.5} y={y - radiusPx * 0.6} width={radiusPx} height={radiusPx * 1.0} rx={Math.max(1, radiusPx * 0.1)} fill="none" stroke={iconStroke} strokeWidth={Math.max(1, radiusPx * 0.08)} />
+                  {/* Two prongs */}
+                  <rect x={x - radiusPx * 0.3} y={y + radiusPx * 0.4} width={radiusPx * 0.2} height={radiusPx * 0.3} fill={iconStroke} />
+                  <rect x={x + radiusPx * 0.1} y={y + radiusPx * 0.4} width={radiusPx * 0.2} height={radiusPx * 0.3} fill={iconStroke} />
+                </g>
+              )}
+
+              {deviceType === "sensor" && (
+                <g>
+                  <circle cx={x} cy={y} r={radiusPx * 0.8} fill="none" stroke={iconStroke} strokeWidth={Math.max(1, radiusPx * 0.08)} />
+                  {/* Concentric sensor rings */}
+                  <circle cx={x} cy={y} r={radiusPx * 0.5} fill="none" stroke={iconStroke} strokeWidth={Math.max(0.5, radiusPx * 0.05)} opacity={0.6} />
+                  <circle cx={x} cy={y} r={radiusPx * 0.2} fill={iconStroke} />
+                </g>
+              )}
+
+              {deviceType === "speaker" && (
+                <g>
+                  {/* Speaker body */}
+                  <rect x={x - radiusPx * 0.5} y={y - radiusPx * 0.7} width={radiusPx} height={radiusPx * 1.4} rx={Math.max(1, radiusPx * 0.12)} fill="none" stroke={iconStroke} strokeWidth={Math.max(1, radiusPx * 0.08)} />
+                  {/* Upper woofer */}
+                  <circle cx={x} cy={y - radiusPx * 0.35} r={Math.max(1, radiusPx * 0.22)} fill="none" stroke={iconStroke} strokeWidth={Math.max(0.5, radiusPx * 0.06)} />
+                  {/* Lower woofer */}
+                  <circle cx={x} cy={y + radiusPx * 0.25} r={Math.max(1.5, radiusPx * 0.32)} fill="none" stroke={iconStroke} strokeWidth={Math.max(0.5, radiusPx * 0.06)} />
+                  <circle cx={x} cy={y + radiusPx * 0.25} r={Math.max(0.5, radiusPx * 0.12)} fill={iconStroke} />
+                </g>
+              )}
+
+              {deviceType === "default" && (
+                <circle cx={x} cy={y} r={radiusPx} fill={isDragging ? "#f26b47" : "#ff7a59"} stroke={isSaving ? "#14532d" : "none"} strokeWidth={isSaving ? 2 : 0} />
+              )}
+
               <text
                 x={labelX}
                 y={y + 4}
@@ -958,6 +1192,37 @@ export default function RoomMapPreview({
                 {d.label}
               </text>
             </g>
+            {isSelected && (
+              <rect
+                x={x + radiusPx - 6}
+                y={y - 6}
+                width={12}
+                height={12}
+                rx={2}
+                data-export-exclude="true"
+                fill="#f8fafc"
+                stroke="#0f172a"
+                strokeWidth={1.5}
+                style={{ cursor: "nwse-resize" }}
+                onPointerDown={(e) => {
+                  if (e.button !== 0) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setSelectedPlacementId(d.id);
+                  setSelectedElementId(null);
+                  pendingResizePlacementPressRef.current = {
+                    placementId: d.id,
+                    pointerId: e.pointerId,
+                    startX: e.clientX,
+                    startY: e.clientY,
+                    startSizeM: d.size_m ?? 0.1,
+                    centerX: x,
+                    centerY: y,
+                  };
+                }}
+              />
+            )}
+            </React.Fragment>
           );
         })}
         </svg>
@@ -1091,6 +1356,93 @@ export default function RoomMapPreview({
         >
           Assign Devices
         </button>
+        <button
+          type="button"
+          onClick={() => onRemoveAllDevices?.()}
+          style={{
+            border: 0,
+            borderRadius: 8,
+            background: "#c0392b",
+            color: "#fff",
+            padding: "3px 10px",
+            cursor: "pointer",
+            font: "inherit",
+            fontSize: "0.82rem",
+          }}
+        >
+          Remove Devices
+        </button>
+        <button
+          type="button"
+          onClick={() => onRemoveAllFixtures?.()}
+          style={{
+            border: 0,
+            borderRadius: 8,
+            background: "#c0392b",
+            color: "#fff",
+            padding: "3px 10px",
+            cursor: "pointer",
+            font: "inherit",
+            fontSize: "0.82rem",
+          }}
+        >
+          Remove Fixtures
+        </button>
+        <div style={{ display: "inline-flex", border: "1px solid #b0bec5", borderRadius: 8, overflow: "hidden", marginLeft: "auto" }}>
+          <button
+            type="button"
+            onClick={() => setZoom((z) => Math.max(0.5, z - 0.1))}
+            style={{
+              padding: "3px 10px",
+              border: "none",
+              background: "#eceff1",
+              color: "#263238",
+              cursor: "pointer",
+              fontSize: "0.8rem",
+              fontWeight: 700,
+            }}
+            aria-label="Zoom out"
+            title="Zoom out"
+          >
+            −
+          </button>
+          <button
+            type="button"
+            onClick={() => setZoom(1)}
+            style={{
+              padding: "3px 10px",
+              border: "none",
+              borderLeft: "1px solid #b0bec5",
+              borderRight: "1px solid #b0bec5",
+              background: "#eceff1",
+              color: "#263238",
+              cursor: "pointer",
+              fontSize: "0.8rem",
+              minWidth: 48,
+            }}
+            aria-label="Reset zoom"
+            title="Reset zoom"
+          >
+            {Math.round(zoom * 100)}%
+          </button>
+          <button
+            type="button"
+            onClick={() => setZoom((z) => Math.min(3, z + 0.1))}
+            style={{
+              padding: "3px 10px",
+              border: "none",
+              background: "#eceff1",
+              color: "#263238",
+              cursor: "pointer",
+              fontSize: "0.8rem",
+              fontWeight: 700,
+            }}
+            aria-label="Zoom in"
+            title="Zoom in"
+          >
+            +
+          </button>
+        </div>
       </div>
       {selectedElementData && (
         <div
@@ -1235,6 +1587,181 @@ export default function RoomMapPreview({
           </button>
         </div>
       )}
+      {selectedPlacementData && (
+        <div
+          style={{
+            marginTop: 8,
+            padding: "8px 12px",
+            borderRadius: 8,
+            border: "1px solid #c1d0cf",
+            background: "#f5f9f8",
+            display: "flex",
+            gap: "10px",
+            alignItems: "center",
+            flexWrap: "wrap",
+            fontSize: "0.85rem",
+          }}
+        >
+          <strong style={{ fontSize: "0.85rem", color: "#1b2a2f" }}>
+            Device Properties
+          </strong>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "auto 1fr",
+              gap: "2px 10px",
+              width: "100%",
+              fontSize: "0.82rem",
+              marginBottom: 4,
+            }}
+          >
+            <span style={{ fontWeight: 600, color: "#4d5b60" }}>Name:</span>
+            <span style={{ color: "#1b2a2f" }}>{selectedPlacementData.label}</span>
+            <span style={{ fontWeight: 600, color: "#4d5b60" }}>Entity ID:</span>
+            <span style={{ color: "#4d5b60", fontFamily: "monospace", fontSize: "0.8rem" }}>{selectedPlacementData.entity_id}</span>
+            <span style={{ fontWeight: 600, color: "#4d5b60" }}>Domain:</span>
+            <span style={{ color: "#1b2a2f" }}>{selectedPlacementData.domain ?? "—"}</span>
+            <span style={{ fontWeight: 600, color: "#4d5b60" }}>Area:</span>
+            <span style={{ color: "#1b2a2f" }}>{selectedPlacementData.area ?? "—"}</span>
+          </div>
+          <input
+            type="number"
+            min={0.05}
+            max={5}
+            step={0.05}
+            value={convert(selectedPlacementData.size_m ?? 0.1).toFixed(2)}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (v < 0.05 || v > 5) return;
+              const size_m = unit === "ft" ? v / FEET_PER_METER : v;
+              setPlacements((prev) =>
+                prev.map((p) =>
+                  p.id === selectedPlacementData.id ? { ...p, size_m } : p,
+                ),
+              );
+              void onResizePlacement?.(selectedPlacementData.id, size_m);
+            }}
+            style={{
+              fontSize: "0.82rem",
+              padding: "2px 6px",
+              borderRadius: 6,
+              border: "1px solid #a8b8b1",
+              width: 60,
+            }}
+          />
+          <span style={{ fontSize: "0.82rem", color: "#4d5b60" }}>{unitLabel}</span>
+          {onUpdatePlacementType && (() => {
+            const currentType = selectedPlacementData.device_type ?? "default";
+            const derivedType = selectedPlacementData.domain
+              ? (["light", "fan", "switch", "sensor"].includes(selectedPlacementData.domain)
+                  ? selectedPlacementData.domain
+                  : selectedPlacementData.domain === "media_player"
+                    ? "speaker"
+                    : selectedPlacementData.domain === "remote" || selectedPlacementData.domain === "device_tracker"
+                      ? "computer"
+                      : "default")
+              : "default";
+            return (
+              <div style={{ display: "flex", alignItems: "center", gap: "4px", width: "100%", marginTop: 2 }}>
+                <span style={{ fontSize: "0.82rem", fontWeight: 600, color: "#4d5b60", whiteSpace: "nowrap" }}>
+                  Type:
+                </span>
+                <select
+                  value={currentType}
+                  onChange={(e) => {
+                    const newType = e.target.value === "default" ? null : e.target.value;
+                    setPlacements((prev) =>
+                      prev.map((p) =>
+                        p.id === selectedPlacementData.id ? { ...p, device_type: (newType ?? "default") as any } : p,
+                      ),
+                    );
+                    void onUpdatePlacementType(selectedPlacementData.id, newType);
+                  }}
+                  style={{
+                    fontSize: "0.82rem",
+                    padding: "2px 6px",
+                    borderRadius: 6,
+                    border: "1px solid #a8b8b1",
+                    flex: 1,
+                    background: "#fff",
+                    cursor: "pointer",
+                  }}
+                >
+                  <option value="default">Default (auto: {derivedType})</option>
+                  <option value="light">Light</option>
+                  <option value="fan">Fan</option>
+                  <option value="computer">Computer</option>
+                  <option value="switch">Switch</option>
+                  <option value="plug">Plug</option>
+                  <option value="sensor">Sensor</option>
+                  <option value="speaker">Speaker</option>
+                </select>
+              </div>
+            );
+          })()}
+          <button
+            type="button"
+            onClick={() => onToggleLabelVisibility(selectedPlacementData.id)}
+            style={{
+              border: 0,
+              borderRadius: 6,
+              background: hiddenLabelIds.has(selectedPlacementData.id) ? "#eef2f1" : "#e0f2fe",
+              color: hiddenLabelIds.has(selectedPlacementData.id) ? "#6b7a7f" : "#0369a1",
+              padding: "3px 10px",
+              cursor: "pointer",
+              font: "inherit",
+              fontSize: "0.82rem",
+              fontWeight: 600,
+            }}
+            title={hiddenLabelIds.has(selectedPlacementData.id) ? "Show label" : "Hide label"}
+          >
+            {hiddenLabelIds.has(selectedPlacementData.id) ? "Show label" : "Hide label"}
+          </button>
+          {onDeletePlacement && (
+            <button
+              type="button"
+              onClick={() => {
+                void onDeletePlacement(selectedPlacementData.id);
+                setSelectedPlacementId(null);
+              }}
+              style={{
+                border: 0,
+                borderRadius: 6,
+                background: "#fee2e2",
+                color: "#991b1b",
+                padding: "3px 10px",
+                cursor: "pointer",
+                font: "inherit",
+                fontSize: "0.82rem",
+                fontWeight: 600,
+              }}
+              title="Delete device"
+            >
+              Delete
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setSelectedPlacementId(null)}
+            style={{
+              border: 0,
+              borderRadius: 6,
+              background: "transparent",
+              color: "#6b7a7f",
+              padding: "3px 8px",
+              cursor: "pointer",
+              font: "inherit",
+              fontSize: "0.82rem",
+            }}
+            title="Deselect"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+      <small style={{ display: "block", marginTop: 6, fontSize: "0.75rem", color: "#6b7a7f" }}>
+        Tip: Click a fixture or device to select it, then use arrow keys to nudge. Shift+arrows for larger steps. Esc to deselect.
+      </small>
     </div>
   );
 }

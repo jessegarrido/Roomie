@@ -41,6 +41,7 @@ export default function FloorMapPreview({ rooms, selectedRoomIds, unit, roomMaps
 
   // Drag state
   const [dragRoomId, setDragRoomId] = useState<number | null>(null);
+  const [zoom, setZoom] = useState(1);
   const dragStartRef = useRef<{ pointerId: number; startX: number; startY: number; roomStartX: number; roomStartY: number; scaleX: number; scaleY: number } | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
 
@@ -332,20 +333,74 @@ export default function FloorMapPreview({ rooms, selectedRoomIds, unit, roomMaps
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
         <h2 style={{ marginTop: 0, marginBottom: 0 }}>Floor Map</h2>
-        {allHaveMapData && (
-          <button
-            type="button"
-            onClick={handleDownloadSvg}
-            style={{ border: 0, borderRadius: 8, background: "#dde8e4", color: "#1b2a2f", padding: "0.45rem 0.7rem", cursor: "pointer", font: "inherit" }}
-          >
-            Download SVG
-          </button>
-        )}
+        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+          <div style={{ display: "inline-flex", border: "1px solid #b0bec5", borderRadius: 8, overflow: "hidden" }}>
+            <button
+              type="button"
+              onClick={() => setZoom((z) => Math.max(0.5, z - 0.1))}
+              style={{
+                padding: "3px 10px",
+                border: "none",
+                background: "#eceff1",
+                color: "#263238",
+                cursor: "pointer",
+                fontSize: "0.8rem",
+                fontWeight: 700,
+              }}
+              aria-label="Zoom out"
+              title="Zoom out"
+            >
+              −
+            </button>
+            <button
+              type="button"
+              onClick={() => setZoom(1)}
+              style={{
+                padding: "3px 10px",
+                border: "none",
+                borderLeft: "1px solid #b0bec5",
+                borderRight: "1px solid #b0bec5",
+                background: "#eceff1",
+                color: "#263238",
+                cursor: "pointer",
+                fontSize: "0.8rem",
+                minWidth: 48,
+              }}
+              aria-label="Reset zoom"
+              title="Reset zoom"
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+            <button
+              type="button"
+              onClick={() => setZoom((z) => Math.min(3, z + 0.1))}
+              style={{
+                padding: "3px 10px",
+                border: "none",
+                background: "#eceff1",
+                color: "#263238",
+                cursor: "pointer",
+                fontSize: "0.8rem",
+                fontWeight: 700,
+              }}
+              aria-label="Zoom in"
+              title="Zoom in"
+            >
+              +
+            </button>
+          </div>
+          {allHaveMapData && (
+            <button
+              type="button"
+              onClick={handleDownloadSvg}
+              style={{ border: 0, borderRadius: 8, background: "#dde8e4", color: "#1b2a2f", padding: "0.45rem 0.7rem", cursor: "pointer", font: "inherit" }}
+            >
+              Download SVG
+            </button>
+          )}
+        </div>
       </div>
-      <p style={{ marginTop: 8, marginBottom: 10, opacity: 0.8, fontSize: "0.92rem" }}>
-        Drag rooms to reposition. Rooms snap to adjacent borders.
-      </p>
-      <div style={{ position: "relative" }}>
+      <div style={{ position: "relative", transform: `scale(${zoom})`, transformOrigin: "top left" }}>
         <svg
           ref={svgRef}
           width="100%"

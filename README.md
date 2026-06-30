@@ -1,7 +1,5 @@
 # HA Agent Capstone (Chat + Tool Calling)
 
-This workspace is a beginner-friendly capstone starter:
-
 - Frontend: Next.js chat UI with room map preview.
 - Backend: FastAPI tool-calling API with SQLite persistence.
 - Mock Home Assistant mode so the app works even without a real HA token.
